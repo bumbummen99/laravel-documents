@@ -70,4 +70,8 @@ Please review [our security policy](.github/SECURITY.md) on how to report securi
 
 ## License
 
-Laravel Documents is open-sourced software licensed under the [MIT license](LICENSE.md).
+Laravel Documents is licensed under the [AGPL-3.0-only](LICENSE.md) with the
+[Library Integration Exception](COPYING.EXCEPTION). Independent applications may
+retain their own license, including proprietary terms; the package and covered
+modifications remain subject to AGPL obligations. See [COPYING](COPYING) for the
+full license.

@@ -2,7 +2,7 @@
 name: laravel-documents-development
 description: >
   Configure and apply the Laravel Documents package in Laravel applications.
-license: MIT
+license: AGPL-3.0-only
 metadata:
   author: Patrick Henninger
 ---
