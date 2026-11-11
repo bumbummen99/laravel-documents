@@ -1,6 +1,6 @@
 // https://aka.ms/devcontainer.json
 {
-    "name": "Laravel Package Skeleton (PHP 8.5)",
+    "name": "Laravel Package LaravelDocuments (PHP 8.5)",
     "build": {
         "dockerfile": "../Dockerfile",
         "context": "..",

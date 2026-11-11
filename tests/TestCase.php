@@ -2,17 +2,17 @@
 
 declare(strict_types=1);
 
-namespace VendorName\Skeleton\Tests;
+namespace SkyRaptor\LaravelDocuments\Tests;
 
 use Orchestra\Testbench\TestCase as Orchestra;
-use VendorName\Skeleton\SkeletonServiceProvider;
+use SkyRaptor\LaravelDocuments\LaravelDocumentsServiceProvider;
 
 abstract class TestCase extends Orchestra
 {
     protected function getPackageProviders($app): array
     {
         return [
-            SkeletonServiceProvider::class,
+            LaravelDocumentsServiceProvider::class,
         ];
     }
 }
