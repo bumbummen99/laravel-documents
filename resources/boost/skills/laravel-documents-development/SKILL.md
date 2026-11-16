@@ -20,7 +20,7 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
 ### 1. Inspect the application
 
 - Identify the subject, Blade view, PDF backend, storage, and queue configuration.
-- Install the selected backend's dependencies. `spatie/laravel-pdf` is required;
+- Install the selected backend's dependencies. `spatie/laravel-pdf` ^2.10 is required;
   Browsershot, versioned storage, and progress packages are optional.
 
 ### 2. Define and generate the document

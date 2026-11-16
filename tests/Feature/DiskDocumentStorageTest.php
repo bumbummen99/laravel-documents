@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Cache\Lock;
 use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Contracts\Cache\Store;
 use Illuminate\Filesystem\FilesystemAdapter;
 use Illuminate\Support\Facades\Config;
@@ -40,8 +41,8 @@ it('requires a filesystem context for every storage operation', function (string
 it('uses the configured lock lease and waits twice as long for a disk write', function () {
     $context = new FilesystemDocumentStorageContext('invoice.pdf', 'documents');
     $lock = Mockery::mock(Lock::class);
-    $lock->shouldReceive('block')->once()->with(4, Mockery::type(Closure::class))
-        ->andReturnUsing(fn ($seconds, Closure $write) => $write());
+    $lock->shouldReceive('block')->once()->with(4)->andReturnTrue();
+    $lock->shouldReceive('release')->once()->withNoArgs()->andReturnTrue();
     $store = Mockery::mock(Store::class, LockProvider::class);
     $store->shouldReceive('lock')->once()->with(DiskDocumentStorage::writeLockKey($context), 2)->andReturn($lock);
     app('cache')->extend('disk-write-test', fn () => new Repository($store));
@@ -51,6 +52,22 @@ it('uses the configured lock lease and waits twice as long for a disk write', fu
     expect((new DiskDocumentStorage(lockTimeout: 2))->write($context, 'PDF'))->toBeNull()
         ->and(Storage::disk('documents')->get($context->path))->toBe('PDF')
         ->and((new DiskDocumentStorage)->lockTimeout)->toBe(10);
+});
+
+it('does not release an unacquired lock or write after a lock timeout', function () {
+    $context = new FilesystemDocumentStorageContext('invoice.pdf', 'documents');
+    $lock = Mockery::mock(Lock::class);
+    $lock->shouldReceive('block')->once()->with(4)->andThrow(new LockTimeoutException);
+    $lock->shouldNotReceive('release');
+    $store = Mockery::mock(Store::class, LockProvider::class);
+    $store->shouldReceive('lock')->once()->with(DiskDocumentStorage::writeLockKey($context), 2)->andReturn($lock);
+    app('cache')->extend('disk-timeout-test', fn () => new Repository($store));
+    Config::set('cache.stores.disk-timeout-test', ['driver' => 'disk-timeout-test']);
+    Config::set('cache.default', 'disk-timeout-test');
+
+    expect(fn () => (new DiskDocumentStorage(lockTimeout: 2))->write($context, 'PDF'))
+        ->toThrow(LockTimeoutException::class)
+        ->and(Storage::disk('documents')->exists($context->path))->toBeFalse();
 });
 
 it('propagates a failed disk write instead of reporting success', function () {

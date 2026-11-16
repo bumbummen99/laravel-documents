@@ -41,15 +41,19 @@ class DiskDocumentStorage implements Contracts\DocumentStorage
         }
 
         $written = false;
+        $lock = $store->lock(static::writeLockKey($context), $this->lockTimeout);
+        $lock->block($this->lockTimeout * 2);
 
         try {
-            $store->lock(static::writeLockKey($context), $this->lockTimeout)->block($this->lockTimeout * 2, function () use ($context, $contents, &$written) {
+            try {
                 if (! Storage::disk($context->disk)->put($context->path, $contents)) {
                     throw new RuntimeException('Failed to write the generated PDF.');
                 }
 
                 $written = true;
-            });
+            } finally {
+                $lock->release();
+            }
         } catch (Throwable $exception) {
             if (! $written) {
                 throw $exception;

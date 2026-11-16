@@ -42,9 +42,11 @@ final class DocumentSnapshotCache
         $fingerprint = $generated->fingerprint;
         $stored = false;
         $version = null;
+        $lock = $lockProvider->lock($key.':lock', $lockSeconds);
+        $lock->block($waitSeconds);
 
         try {
-            return $lockProvider->lock($key.':lock', $lockSeconds)->block($waitSeconds, function () use ($store, $key, $fingerprint, $write, &$stored, &$version) {
+            try {
                 if ($store->has($key) && ! $store->forget($key)) {
                     throw new RuntimeException('Failed to invalidate the previous document snapshot.');
                 }
@@ -61,7 +63,9 @@ final class DocumentSnapshotCache
                 }
 
                 return $version;
-            });
+            } finally {
+                $lock->release();
+            }
         } catch (Throwable $exception) {
             if (! $stored) {
                 throw $exception;

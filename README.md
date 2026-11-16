@@ -18,7 +18,8 @@ A document system for your Laravel application.
 composer require skyraptor/laravel-documents
 ```
 
-The package installs `spatie/laravel-pdf`, but each PDF backend has its own
+The package requires `spatie/laravel-pdf` 2.10 or later in the 2.x series for
+builder-level caching controls and PDF post-processing. Each PDF backend has its own
 requirements. For Spatie's default Browsershot driver, also install
 `spatie/browsershot` and its Node.js, Puppeteer, and Chrome prerequisites. See
 the [Spatie Laravel PDF documentation](https://spatie.be/docs/laravel-pdf/v2/introduction)

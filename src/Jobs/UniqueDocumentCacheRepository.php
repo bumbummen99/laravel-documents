@@ -22,9 +22,10 @@ final class UniqueDocumentCacheRepository extends Repository
     }
 
     /**
+     * @param  string  $method
      * @param  array<int, mixed>  $parameters
      */
-    public function __call($method, $parameters)
+    public function __call(mixed $method, mixed $parameters): mixed
     {
         if (in_array($method, ['lock', 'restoreLock'], true)
             && $this->getStore() instanceof LockProvider) {
