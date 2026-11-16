@@ -7,6 +7,7 @@ namespace SkyRaptor\LaravelDocuments\Jobs;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\Store;
+use InvalidArgumentException;
 
 /**
  * Routes framework unique-job locks for a document job to its target key,
@@ -14,11 +15,11 @@ use Illuminate\Contracts\Cache\Store;
  */
 final class UniqueDocumentCacheRepository extends Repository
 {
-    public function __construct(
-        Store $store,
-        private readonly string $uniqueLockKey,
-    ) {
-        parent::__construct($store);
+    public const string STORE_NAME = 'laravel-documents-unique';
+
+    public function __construct(Store $store)
+    {
+        parent::__construct($store, ['store' => self::STORE_NAME]);
     }
 
     /**
@@ -29,11 +30,20 @@ final class UniqueDocumentCacheRepository extends Repository
     {
         if (in_array($method, ['lock', 'restoreLock'], true)
             && $this->getStore() instanceof LockProvider) {
-            $parameters[0] = $this->uniqueLockKey;
+            $parameters[0] = $this->lockKey($parameters[0]);
 
             return $this->getStore()->{$method}(...$parameters);
         }
 
         return parent::__call($method, $parameters);
+    }
+
+    private function lockKey(string $frameworkKey): string
+    {
+        if (preg_match('/\Alaravel_unique_job:.+:([a-f0-9]{32})\z/s', $frameworkKey, $matches) !== 1) {
+            throw new InvalidArgumentException('Expected a Laravel unique-job lock key with a document context identity.');
+        }
+
+        return 'laravel_unique_document:'.$matches[1];
     }
 }

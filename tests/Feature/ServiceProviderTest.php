@@ -14,6 +14,7 @@ use SkyRaptor\LaravelDocuments\GeneratedDocument;
 use SkyRaptor\LaravelDocuments\Jobs\DocumentJobFactory;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateUniqueDocument;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateVersionedDocument;
+use SkyRaptor\LaravelDocuments\Jobs\UniqueDocumentCacheRepository;
 use SkyRaptor\LaravelDocuments\LaravelDocumentsServiceProvider;
 use SkyRaptor\LaravelDocuments\Pdf\DocumentPdfDriverManager;
 use SkyRaptor\LaravelDocuments\RenderedDocument;
@@ -73,6 +74,14 @@ it('registers shared document services', function () {
     foreach ([DocumentSnapshotCache::class, DocumentPdfDriverManager::class, DocumentStorageManager::class] as $service) {
         expect(app($service))->toBe(app($service));
     }
+});
+
+it('rejects selecting the internal lock cache as the default store', function () {
+    config(['cache.default' => UniqueDocumentCacheRepository::STORE_NAME]);
+    $job = new GenerateUniqueDocument(new RenderedDocument('HTML', new DocumentTarget('disk', new RecordStorageContext(42))));
+
+    expect(fn () => $job->uniqueVia())
+        ->toThrow(LogicException::class, 'The internal document lock cache cannot be the default cache store.');
 });
 
 it('resolves independent document operation services through the container', function () {

@@ -4,10 +4,15 @@ declare(strict_types=1);
 
 namespace SkyRaptor\LaravelDocuments;
 
+use Illuminate\Cache\CacheManager;
+use Illuminate\Cache\NullStore;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Support\ServiceProvider;
+use LogicException;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateVersionedDocument;
+use SkyRaptor\LaravelDocuments\Jobs\UniqueDocumentCacheRepository;
 use SkyRaptor\LaravelDocuments\Pdf\DocumentPdfDriverManager;
 use SkyRaptor\LaravelDocuments\Storage\DiskDocumentStorage;
 use SkyRaptor\LaravelDocuments\Storage\DocumentStorageManager;
@@ -22,6 +27,25 @@ class LaravelDocumentsServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->replaceConfigRecursivelyFrom(__DIR__.'/../config/laravel-documents.php', 'laravel-documents');
+
+        $this->app->make('config')->set('cache.stores.'.UniqueDocumentCacheRepository::STORE_NAME, [
+            'driver' => UniqueDocumentCacheRepository::STORE_NAME,
+        ]);
+        $this->callAfterResolving('cache', function (CacheManager $cache): void {
+            $cache->extend(UniqueDocumentCacheRepository::STORE_NAME, function () use ($cache): UniqueDocumentCacheRepository {
+                if ($cache->getDefaultDriver() === UniqueDocumentCacheRepository::STORE_NAME) {
+                    throw new LogicException('The internal document lock cache cannot be the default cache store.');
+                }
+
+                $store = $cache->store()->getStore();
+
+                if (! $store instanceof LockProvider || $store instanceof NullStore) {
+                    throw new LogicException('Unique document jobs require a default cache store with atomic locks.');
+                }
+
+                return new UniqueDocumentCacheRepository($store);
+            });
+        });
 
         $this->app->singleton(DocumentSnapshotCache::class);
         $this->app->singleton(DocumentStorageManager::class, function (Application $app): DocumentStorageManager {

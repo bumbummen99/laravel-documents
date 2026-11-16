@@ -39,7 +39,10 @@ abstract class AbstractGenerateDocument implements GenerateDocument
      */
     protected string $generatorClass = DocumentGenerator::class;
 
+    // Keep the legacy field in native payloads for older workers.
     private ?string $generationId = null;
+
+    protected ?string $documentGenerationId = null;
 
     private bool $generated = false;
 
@@ -56,7 +59,7 @@ abstract class AbstractGenerateDocument implements GenerateDocument
          */
         protected RenderedDocument $rendered,
     ) {
-        $this->generationId = (string) Str::uuid();
+        $this->documentGenerationId = $this->generationId = (string) Str::uuid();
     }
 
     /**
@@ -93,7 +96,7 @@ abstract class AbstractGenerateDocument implements GenerateDocument
      */
     public function generationId(): string
     {
-        return $this->generationId ??= $this->job?->uuid() ?? (string) Str::uuid();
+        return $this->documentGenerationId ??= $this->generationId ?? $this->job?->uuid() ?? (string) Str::uuid();
     }
 
     /**

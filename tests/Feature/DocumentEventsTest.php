@@ -193,6 +193,7 @@ it('uses one generation id when a failed attempt is retried successfully', funct
 it('uses the queue uuid across retries for legacy jobs without a generation id', function () {
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/42.pdf', 'documents'));
     $job = new GenerateUniqueDocument(new RenderedDocument('HTML', $target));
+    (new ReflectionProperty(AbstractGenerateDocument::class, 'documentGenerationId'))->setValue($job, null);
     (new ReflectionProperty(AbstractGenerateDocument::class, 'generationId'))->setValue($job, null);
     $legacyPayload = serialize($job);
     $queueJob = Mockery::mock(QueueJob::class);

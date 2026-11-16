@@ -117,7 +117,7 @@ it('can serialize a queued job with the snapshot and storage identifier', functi
     $restoredSnapshot = (new ReflectionClass($restored))->getProperty('rendered')->getValue($restored);
 
     expect($restored)->toBeInstanceOf(GenerateUniqueDocument::class)
-        ->and($restored->uniqueId())->toBe('documents:invoices/9.pdf')
+        ->and($restored->uniqueId())->toBe(hash('xxh128', $rendered->target->context->identity()))
         ->and($restoredSnapshot)->toEqual($rendered)
         ->and($restoredSnapshot->target->storage)->toBe('disk');
 });

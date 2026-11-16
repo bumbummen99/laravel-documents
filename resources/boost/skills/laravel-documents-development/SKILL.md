@@ -99,6 +99,9 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
 - Unique jobs cannot be batched. Batch versioned jobs only with an asynchronous
   queue and storage that supports multiple writes. The last published version,
   not necessarily the last dispatched or completed job, becomes current.
+- Custom unique jobs using `SerializesModels` release their shared target lock
+  when a missing related model causes Laravel to delete or fail the job. Keep
+  models out of the frozen document input.
 
 ## Rules, References, and Templates
 

@@ -452,8 +452,17 @@ kinds of progress are needed.
 `GenerateUniqueDocument` and its tracked subclass reject batching because
 Laravel does not acquire unique locks for batched jobs. Dispatch them
 individually; unique locks are shared across subclasses for the same target.
+Custom unique jobs using Laravel's `SerializesModels` also release that shared
+lock when Laravel deletes or fails the job because a related model is missing.
+The model must not be part of the frozen document input.
 
 ### Upgrading from the previous API
+
+Unique jobs now expose a hash of the storage-context identity through `uniqueId()`,
+while retaining the same underlying target lock
+keys. Drain old unique-job payloads before deploying this change: their saved
+missing-model cleanup metadata cannot be repaired retroactively. Locks already
+leaked by missing-model cleanup need to be removed manually.
 
 The skeleton-only `LaravelDocuments` service and facade, placeholder command,
 translation, and migration were removed. Previously published copies and any
