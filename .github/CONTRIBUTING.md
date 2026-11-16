@@ -26,6 +26,13 @@ Clone your fork, then install the dev dependencies:
 composer install
 ```
 
+PHPStan is temporarily constrained below 2.3.6 because Pest's type-coverage
+plugin calls an API removed in that release. Track the upstream fix in
+[pestphp/pest-plugin-type-coverage#75](https://github.com/pestphp/pest-plugin-type-coverage/pull/75).
+Remove the upper bound once compatible plugins are available for both supported
+Pest versions. CI resolves dependencies afresh, so a local lockfile alone does
+not prevent this incompatibility.
+
 ## Lint
 
 Lint your code:
