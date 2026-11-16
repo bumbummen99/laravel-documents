@@ -324,6 +324,10 @@ appropriate contention timeout. Defaults are 300 and 30 seconds, respectively.
 Partial configuration overrides retain defaults for omitted nested settings.
 Unique-job locks and disk-storage write locks use Laravel's default cache store;
 it must also support atomic locks and be shared across processes.
+Unique-lock operations follow the active default store after cache switches or
+driver purges in long-lived processes. Configure the same store and prefix for
+dispatch and worker execution, before job deserialization, and keep that context
+through cleanup. Switching stores does not migrate locks already held.
 
 The lock serializes each target's storage publication and snapshot-cache update;
 PDF generation itself can run concurrently. A failed storage write invalidates

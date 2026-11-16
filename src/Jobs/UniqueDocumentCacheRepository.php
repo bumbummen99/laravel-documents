@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace SkyRaptor\LaravelDocuments\Jobs;
 
+use Closure;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Cache\Store;
@@ -12,14 +13,24 @@ use InvalidArgumentException;
 /**
  * Routes framework unique-job locks for a document job to its target key,
  * rather than including the concrete job class in the key.
+ *
+ * @internal
  */
 final class UniqueDocumentCacheRepository extends Repository
 {
     public const string STORE_NAME = 'laravel-documents-unique';
 
-    public function __construct(Store $store)
+    /**
+     * @param  Closure(): Store  $resolveStore
+     */
+    public function __construct(private readonly Closure $resolveStore)
     {
-        parent::__construct($store, ['store' => self::STORE_NAME]);
+        parent::__construct($this->getStore(), ['store' => self::STORE_NAME]);
+    }
+
+    public function getStore(): Store
+    {
+        return $this->store = ($this->resolveStore)();
     }
 
     /**
@@ -28,11 +39,13 @@ final class UniqueDocumentCacheRepository extends Repository
      */
     public function __call(mixed $method, mixed $parameters): mixed
     {
+        $store = $this->getStore();
+
         if (in_array($method, ['lock', 'restoreLock'], true)
-            && $this->getStore() instanceof LockProvider) {
+            && $store instanceof LockProvider) {
             $parameters[0] = $this->lockKey($parameters[0]);
 
-            return $this->getStore()->{$method}(...$parameters);
+            return $store->{$method}(...$parameters);
         }
 
         return parent::__call($method, $parameters);

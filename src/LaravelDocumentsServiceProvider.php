@@ -7,6 +7,7 @@ namespace SkyRaptor\LaravelDocuments;
 use Illuminate\Cache\CacheManager;
 use Illuminate\Cache\NullStore;
 use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Contracts\Cache\Store;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Support\ServiceProvider;
@@ -32,7 +33,7 @@ class LaravelDocumentsServiceProvider extends ServiceProvider
             'driver' => UniqueDocumentCacheRepository::STORE_NAME,
         ]);
         $this->callAfterResolving('cache', function (CacheManager $cache): void {
-            $cache->extend(UniqueDocumentCacheRepository::STORE_NAME, function () use ($cache): UniqueDocumentCacheRepository {
+            $resolveStore = function () use ($cache): Store {
                 if ($cache->getDefaultDriver() === UniqueDocumentCacheRepository::STORE_NAME) {
                     throw new LogicException('The internal document lock cache cannot be the default cache store.');
                 }
@@ -43,8 +44,10 @@ class LaravelDocumentsServiceProvider extends ServiceProvider
                     throw new LogicException('Unique document jobs require a default cache store with atomic locks.');
                 }
 
-                return new UniqueDocumentCacheRepository($store);
-            });
+                return $store;
+            };
+
+            $cache->extend(UniqueDocumentCacheRepository::STORE_NAME, fn (): UniqueDocumentCacheRepository => new UniqueDocumentCacheRepository($resolveStore));
         });
 
         $this->app->singleton(DocumentSnapshotCache::class);

@@ -82,6 +82,7 @@ it('releases shared target locks after processing custom jobs with related model
     config([
         'cache.default' => 'document-locks',
         'cache.stores.document-locks' => ['driver' => 'array'],
+        'cache.stores.warmup-locks' => ['driver' => 'array'],
         'queue.default' => 'database',
         'queue.connections.database' => [
             'driver' => 'database',
@@ -110,6 +111,9 @@ it('releases shared target locks after processing custom jobs with related model
     $job->withGenerator(FakeDocumentGenerator::class);
     $generationId = $job->generationId();
 
+    Cache::setDefaultDriver('warmup-locks');
+    $job->uniqueVia();
+    Cache::setDefaultDriver('document-locks');
     dispatch($job);
     expect(DB::table('jobs')->count())->toBe(1);
 
@@ -129,6 +133,12 @@ it('releases shared target locks after processing custom jobs with related model
     if (! $modelMissing) {
         Event::assertDispatched(DocumentStored::class, fn (DocumentStored $event) => $event->generationId === $generationId);
         expect($storage->get($rendered->target->context))->toBe('rendered PDF');
+    }
+
+    foreach (['warmup-locks', 'document-locks'] as $store) {
+        $lock = Cache::store($store)->lock('laravel_unique_document:'.$job->uniqueId(), 60);
+        expect($lock->get())->toBeTrue();
+        $lock->release();
     }
 
     dispatch(new GenerateUniqueDocument($rendered));
