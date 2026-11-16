@@ -28,7 +28,7 @@ runs:
   using: composite
   steps:
     - name: Setup PHP
-      uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+      uses: shivammathur/setup-php@v2
       with:
         php-version: ${{ inputs.php }}
         extensions: dom, curl, libxml, mbstring, zip, fileinfo, sqlite, pdo_sqlite, bcmath, intl${{ inputs.extensions && format(', {0}', inputs.extensions) || '' }}

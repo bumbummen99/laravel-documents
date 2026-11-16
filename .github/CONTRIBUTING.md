@@ -43,10 +43,29 @@ composer lint
 
 ## Tests
 
-Run all tests:
+Run all checks and tests using PHP 8.4+, Pest 5, and type-coverage plugin 5.0.1
+or newer:
 
 ```bash
 composer test
+```
+
+CI runs formatting and type coverage once in the dedicated latest-stable Checks job using PHP 8.5,
+Laravel 13, Pest 5, and the latest compatible type-coverage plugin 5.x
+(at least 5.0.1, which includes the cache-locking fix). Runtime tests and
+PHPStan retain their existing compatibility matrices;
+the older plugin is not executed for type coverage in those jobs.
+All runtime-test matrices wait for Checks to pass and are skipped if it fails.
+The type-coverage threshold remains 100%.
+
+Type coverage is a latest-stack-only check; no serialization override is needed.
+For local PHP 8.3/Pest 4 compatibility testing, run the checks without type
+coverage instead of `composer test`:
+
+```bash
+composer analyse
+composer lint:check
+composer test:unit
 ```
 
 Run mutation testing separately to check whether the tests detect changes in

@@ -15,7 +15,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  checks:
+    name: Checks - Latest Stable
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup package
+        uses: ./.github/actions/setup-package
+        with:
+          php: '8.5'
+          laravel: '13.*'
+          testbench: '11.*'
+          stability: prefer-stable
+          packages: pestphp/pest:^5.0 pestphp/pest-plugin-type-coverage:^5.0.1
+
+      - name: Linter
+        run: composer lint:check
+
+      - name: Type Coverage
+        run: composer test:types
+
   tests:
+    needs: checks
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -35,7 +59,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7
 
       - name: Setup package
         uses: ./.github/actions/setup-package
@@ -48,13 +72,6 @@ jobs:
       - name: PHPStan
         run: composer analyse
 
-      - name: Linter
-        run: composer lint:check
-
-      - name: Type Coverage
-        if: runner.os != 'Windows'
-        run: composer test:types
-
       - name: Test Suite
         if: runner.os != 'Windows'
         run: composer test:unit
@@ -64,6 +81,7 @@ jobs:
         run: vendor/bin/pest
 
   versioned-storage-tests:
+    needs: checks
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -80,7 +98,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7
 
       - name: Setup package
         uses: ./.github/actions/setup-package
@@ -99,6 +117,7 @@ jobs:
         run: vendor/bin/pest tests/Feature/JobProgressVersionedStorageTest.php --fail-on-skipped
 
   without-optional-dependencies-tests:
+    needs: checks
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -114,7 +133,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7
 
       - name: Setup package
         uses: ./.github/actions/setup-package
