@@ -60,6 +60,73 @@ it('creates an independent configured PDF builder for each generation', function
         ->and($second->metadata?->title)->toBe('Invoice');
 });
 
+it('keeps factory, named, explicit and default PDF driver selections distinct', function () {
+    app()->instance(PdfDriver::class, new ConfiguredPdfDriver('default'));
+    app()->instance('laravel-pdf.driver.selected', new ConfiguredPdfDriver('named'));
+    $manager = app(DocumentPdfDriverManager::class);
+    $manager->register('selection', fn () => new ConfiguredPdfDriver('factory'));
+    $builder = $manager->builder('selection')->html('HTML');
+
+    expect($builder->generatePdfContent())->toBe('factory::HTML');
+
+    $builder->driver('selected');
+    expect($builder->generatePdfContent())->toBe('named::HTML');
+
+    $builder->setDriver(new ConfiguredPdfDriver('explicit'));
+    expect($builder->generatePdfContent())->toBe('explicit::HTML');
+
+    $builder->driver('');
+    expect($builder->generatePdfContent())->toBe('default::HTML');
+
+    $builder->driver('selected');
+    expect($builder->generatePdfContent())->toBe('named::HTML');
+});
+
+it('ignores browser-only settings and preserves non-Browsershot driver identity', function (bool $selectNamedDriver, bool $onLambda, bool $customizeBrowsershot) {
+    $driver = new class implements PdfDriver
+    {
+        public function generatePdf(string $html, ?string $headerHtml, ?string $footerHtml, PdfOptions $options): string
+        {
+            return spl_object_id($this).':'.$options->format.':'.$html;
+        }
+
+        public function savePdf(string $html, ?string $headerHtml, ?string $footerHtml, PdfOptions $options, string $path): void
+        {
+            throw new LogicException('The document package generates PDF contents instead of asking the driver to save.');
+        }
+    };
+    app()->instance(PdfDriver::class, new ConfiguredPdfDriver('default'));
+    app()->instance('laravel-pdf.driver.custom', $driver);
+    $manager = app(DocumentPdfDriverManager::class);
+    $manager->register('custom', fn () => $driver, function (PdfBuilder $builder) use ($selectNamedDriver, $onLambda, $customizeBrowsershot): void {
+        if ($selectNamedDriver) {
+            $builder->driver('custom');
+        }
+
+        if ($onLambda) {
+            $builder->onLambda();
+        }
+
+        if ($customizeBrowsershot) {
+            $builder->withBrowsershot(function (Browsershot $browser): void {
+                throw new LogicException('Non-Browsershot drivers must not run browser callbacks.');
+            });
+        }
+    });
+    $builder = $manager->builder('custom')->format('A4')->html('HTML');
+
+    for ($attempt = 0; $attempt < 2; $attempt++) {
+        expect($builder->generatePdfContent())->toBe(spl_object_id($driver).':A4:HTML');
+    }
+})->with([
+    'factory driver' => [false],
+    'builder-selected driver' => [true],
+])->with([
+    'Lambda only' => [true, false],
+    'browser callback only' => [false, true],
+    'Lambda and browser callback' => [true, true],
+]);
+
 it('isolates shared Browsershot settings while preserving factory defaults', function (bool $selectNamedDriver, bool $failCustomized) {
     $driver = new class extends BrowsershotDriver
     {
