@@ -19,6 +19,8 @@ Prove package behavior with Pest 4/5, Orchestra Testbench, and the local `tests/
 3. Prefer focused feature tests for package integration behavior and arch tests for broad constraints.
 4. Use `composer test:unit -- --filter ...` while iterating, `composer test:types` when type-sensitive tests or code changed, and `composer test` before finishing.
 5. Keep real package tests in the suite and remove only throwaway tests that were explicitly created for local scaffolding experiments.
+6. Use `composer test:mutation` with PCOV or Xdebug coverage to find missing behavioral assertions. Keep uncovered optional integrations and equivalent mutations visible; do not weaken the mutation scope to inflate the score.
+7. Do not pass `--processes` to the current Pest mutation runner: it forwards the option to child PHPUnit processes, whose errors can falsely count as detected mutations. See `.github/CONTRIBUTING.md` for focused mutation commands.
 
 ## References
 

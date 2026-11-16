@@ -18,17 +18,21 @@
     ],
     "require": {
         "php": "^8.3",
-        "illuminate/support": "^12.0||^13.0"
+        "illuminate/support": "^12.0||^13.0",
+        "spatie/laravel-pdf": "^2.0"
     },
     "require-dev": {
+        "dompdf/dompdf": "^3.1.6",
         "larastan/larastan": "^3.9",
-        "laravel/pint": "^1.32.3",
         "laravel/pao": "^1.0",
+        "laravel/pint": "^1.32.3",
+        "mateffy/laravel-job-progress": "^2.2",
         "orchestra/testbench": "^10.0||^11.0",
         "pestphp/pest": "^4.6||^5.0",
         "pestphp/pest-plugin-laravel": "^4.1||^5.0",
         "pestphp/pest-plugin-type-coverage": "^4.0||^5.0",
-        "phpstan/extension-installer": "^1.4"
+        "phpstan/extension-installer": "^1.4",
+        "spatie/browsershot": "^4.0||^5.0"
     },
     "autoload": {
         "psr-4": {
@@ -74,6 +78,10 @@
         "test:unit": [
             "vendor/bin/pest --parallel"
         ],
+        "test:mutation": [
+            "Composer\\Config::disableProcessTimeout",
+            "vendor/bin/pest --mutate --everything --parallel"
+        ],
         "test": [
             "@analyse",
             "@lint:check",
@@ -88,10 +96,7 @@
         "laravel": {
             "providers": [
                 "SkyRaptor\\LaravelDocuments\\LaravelDocumentsServiceProvider"
-            ],
-            "aliases": {
-                "LaravelDocuments": "SkyRaptor\\LaravelDocuments\\Facades\\LaravelDocuments"
-            }
+            ]
         }
     },
     "config": {
@@ -102,5 +107,10 @@
         }
     },
     "minimum-stability": "stable",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "suggest": {
+        "mateffy/laravel-job-progress": "Required to use the optional built-in job progress integration.",
+        "skyraptor/laravel-versioned-storage": "Required to keep multiple versions with VersionedDocumentStorage (requires a Unix-like runtime with PCNTL, POSIX, and sockets).",
+        "spatie/browsershot": "Required to use the Browsershot PDF driver."
+    }
 }

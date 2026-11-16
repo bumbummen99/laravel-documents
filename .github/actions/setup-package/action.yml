@@ -1,0 +1,47 @@
+name: Setup package
+description: Set up PHP and install the package dependencies for one matrix entry.
+
+inputs:
+  php:
+    description: PHP version.
+    required: true
+  laravel:
+    description: Laravel framework constraint.
+    required: true
+  testbench:
+    description: Orchestra Testbench constraint.
+    required: true
+  stability:
+    description: Composer dependency stability, e.g. prefer-lowest or prefer-stable.
+    required: true
+  extensions:
+    description: Additional PHP extensions, comma-separated.
+    default: ''
+  packages:
+    description: Additional Composer packages to require for development.
+    default: ''
+  composer-flags:
+    description: Additional flags for composer update.
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Setup PHP
+      uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+      with:
+        php-version: ${{ inputs.php }}
+        extensions: dom, curl, libxml, mbstring, zip, fileinfo, sqlite, pdo_sqlite, bcmath, intl${{ inputs.extensions && format(', {0}', inputs.extensions) || '' }}
+        ini-values: error_reporting=E_ALL
+        tools: composer:v2
+        coverage: none
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        composer require "laravel/framework:${{ inputs.laravel }}" "orchestra/testbench:${{ inputs.testbench }}" --no-interaction --no-update
+        if [ -n "${{ inputs.packages }}" ]; then
+          composer require --dev ${{ inputs.packages }} --no-interaction --no-update
+        fi
+        composer update --${{ inputs.stability }} ${{ inputs.composer-flags }} --prefer-dist --no-interaction --no-progress --no-scripts
+        composer run prepare

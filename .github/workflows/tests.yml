@@ -21,11 +21,11 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        php: [8.3, 8.4, 8.5]
-        laravel: [12.*, 13.*]
-        stability: [prefer-lowest, prefer-stable]
-        include:
+        os: &os [ubuntu-latest, windows-latest]
+        php: &php [8.3, 8.4, 8.5]
+        laravel: &laravel [12.*, 13.*]
+        stability: &stability [prefer-lowest, prefer-stable]
+        include: &testbench
           - laravel: 12.*
             testbench: 10.*
           - laravel: 13.*
@@ -37,20 +37,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Setup PHP
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+      - name: Setup package
+        uses: ./.github/actions/setup-package
         with:
-          php-version: ${{ matrix.php }}
-          extensions: dom, curl, libxml, mbstring, zip, fileinfo, sqlite, pdo_sqlite, bcmath, intl
-          ini-values: error_reporting=E_ALL
-          tools: composer:v2
-          coverage: none
-
-      - name: Install dependencies
-        run: |
-          composer require "laravel/framework:${{ matrix.laravel }}" "orchestra/testbench:${{ matrix.testbench }}" --no-interaction --no-update
-          composer update --${{ matrix.stability }} --prefer-dist --no-interaction --no-progress --no-scripts
-          composer run prepare
+          php: ${{ matrix.php }}
+          laravel: ${{ matrix.laravel }}
+          testbench: ${{ matrix.testbench }}
+          stability: ${{ matrix.stability }}
 
       - name: PHPStan
         run: composer analyse
@@ -69,3 +62,68 @@ jobs:
       - name: Test Suite (Windows)
         if: runner.os == 'Windows'
         run: vendor/bin/pest
+
+  versioned-storage-tests:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: true
+      matrix:
+        # Versioned storage requires PCNTL, POSIX, and sockets, which native Windows PHP lacks.
+        os: [ubuntu-latest]
+        php: *php
+        laravel: *laravel
+        stability: *stability
+        include: *testbench
+
+    name: Versioned Storage - P${{ matrix.php }} - L${{ matrix.laravel }} - ${{ matrix.stability }} - ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup package
+        uses: ./.github/actions/setup-package
+        with:
+          php: ${{ matrix.php }}
+          laravel: ${{ matrix.laravel }}
+          testbench: ${{ matrix.testbench }}
+          stability: ${{ matrix.stability }}
+          extensions: pcntl, posix, sockets
+          packages: skyraptor/laravel-versioned-storage:0.2.0-beta.1
+
+      - name: PHPStan
+        run: composer analyse
+
+      - name: Test Suite
+        run: vendor/bin/pest tests/Feature/JobProgressVersionedStorageTest.php --fail-on-skipped
+
+  without-optional-dependencies-tests:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: true
+      matrix:
+        os: *os
+        php: *php
+        laravel: *laravel
+        stability: *stability
+        include: *testbench
+
+    name: Without Optional Dependencies - P${{ matrix.php }} - L${{ matrix.laravel }} - ${{ matrix.stability }} - ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup package
+        uses: ./.github/actions/setup-package
+        with:
+          php: ${{ matrix.php }}
+          laravel: ${{ matrix.laravel }}
+          testbench: ${{ matrix.testbench }}
+          stability: ${{ matrix.stability }}
+          composer-flags: --no-dev
+
+      - name: Test Suite
+        run: php tests/Smoke/WithoutOptionalDependencies.php vendor/autoload.php

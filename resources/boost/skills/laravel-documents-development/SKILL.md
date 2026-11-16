@@ -13,29 +13,132 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
 
 ## Primary Goal
 
-- apply the `skyraptor/laravel-documents` package's public API in the smallest correct way
+- Apply the public API of `skyraptor/laravel-documents` in the smallest correct way.
 
 ## Workflow
 
-### 1. Inspect the Laravel app context
+### 1. Inspect the application
 
-- confirm the app is a Laravel project
-- inspect the target code paths where the package should be applied
+- Identify the subject, Blade view, PDF backend, storage, and queue configuration.
+- Install the selected backend's dependencies. `spatie/laravel-pdf` is required;
+  Browsershot, versioned storage, and progress packages are optional.
 
-### 2. Apply the package's public API
+### 2. Define and generate the document
 
-Document how to integrate Laravel Documents here, replacing this placeholder with the integration steps for your package.
+- Extend `Documents\Document`, set `$view` and optionally `$disk`, and implement
+  `path()` and `data()`. `render()` resolves data and returns immutable,
+  serializable `RenderedDocument` input.
+- Import `Facades\Documents`. `Documents::generate($document)` returns an
+  immutable `GeneratedDocument`; read PDF bytes from `contents`. Pass that
+  result to `Documents::publish($generated)` to store it without rendering or
+  generating again. Alternatively, `Documents::publish($document)` completes
+  all stages once.
+- Create jobs with `Documents::makeJob($document)` and dispatch explicitly, or
+  use `makeJobIfChanged()` and dispatch its non-null result. Both accept
+  `connection:`, `queue:`, and `job:`; the explicit job overrides the document's
+  job, which overrides the storage default.
+- The facade resolves injectable `DocumentWorkflow`; it accepts rendered input
+  to skip rendering and generated input for publication to skip generation too.
+  The low-level `DocumentGenerator` accepts only `RenderedDocument` and returns
+  `GeneratedDocument`; `DocumentPublisher` accepts only `GeneratedDocument`.
+  Application tests can mock the facade with `Documents::shouldReceive(...)`.
+- Read the current PDF with `get()` and check it with `exists()`; these do not
+  render the view. A queued job contains the snapshot, not the document or model.
+- `DocumentSnapshotCache::changed($rendered)` compares the cached snapshot, not the PDF, external assets, or
+  settings changed under an existing configuration identifier. Cache eviction
+  causes regeneration; deleted PDFs require an explicit forced job via
+  `Documents::makeJob()`.
+- Configure a shared persistent cache with atomic locks under
+  `laravel-documents.snapshot_cache`. The lock duration must exceed the storage
+  write. Laravel's default cache must also have shared atomic locks for unique
+  jobs and disk writes. Comparison and dispatch are not atomic.
+- Publish `laravel-documents-config` to customize cache settings. The base
+  package has no migrations.
+
+### 3. Configure integrations
+
+- The `default` PDF configuration resolves Spatie's `PdfDriver` in the worker.
+  Register additional named factories and optional `PdfBuilder` callbacks in
+  `DocumentPdfDriverManager`; select one with the document's `$pdfDriver`.
+  Configure page settings, metadata, and encryption on the builder. Generation
+  returns post-processed bytes in `GeneratedDocument::contents` before storage; encryption requires Spatie's
+  optional dependencies. Do not render views or load document data in callbacks.
+- Select a registered storage with the document's `$storage` identifier.
+  `disk` is the default; `versioned` requires
+  `skyraptor/laravel-versioned-storage` and its migrations. Version `0.2.0-beta.1`
+  was tested and requires PCNTL, POSIX, and sockets; native Windows is unsupported.
+- Register custom storages and their default job in `DocumentStorageManager`.
+  For non-filesystem targets, override `storageContext()` with a readonly,
+  serializable `DocumentStorageContext` subclass whose `identity()` uniquely
+  identifies the underlying target across configurations.
+- Register the same configuration identifiers in every application and worker.
+  Concrete drivers and storage services must not be put into snapshots or jobs.
+  Different deployments may resolve the same identifier differently.
+- Listen to `DocumentRendering`, `DocumentStored`, and `DocumentRenderFailed`
+  for lifecycle attempts. Generation emits `DocumentRendering` even without
+  publication; publication emits only stored/failure events. Correlate results
+  and events using `generationId`, or jobs using `generationId()`. Listener
+  exceptions are reported and do not change the stored result.
+- Custom generators extend `DocumentGenerator` and override
+  `protected generateContents(RenderedDocument $rendered): string`; choose one
+  on a job with `withGenerator()`. Generation IDs belong to generated results,
+  not mutable service state.
+- For optional Mateffy progress, install `mateffy/laravel-job-progress` and
+  select `GenerateUniqueDocumentWithProgress` or
+  `GenerateVersionedDocumentWithProgress` from `Integrations\JobProgress`.
+  Progress is separate from Laravel batch progress. Mateffy's error handling
+  applies unchanged: progress failures after storage can fail the job, and queue
+  retries may overwrite the PDF or publish another version.
+- Unique jobs cannot be batched. Batch versioned jobs only with an asynchronous
+  queue and storage that supports multiple writes. The last published version,
+  not necessarily the last dispatched or completed job, becomes current.
 
 ## Rules, References, and Templates
 
-Read before executing:
-
-- no additional resource files for this skill
+- See the package README for registration, cache, migration, event, and progress examples.
 
 ## Examples
 
-- describe a representative integration scenario for Laravel Documents
+```php
+use App\Models\Invoice;
+use SkyRaptor\LaravelDocuments\Documents\Document;
+use SkyRaptor\LaravelDocuments\Facades\Documents;
+
+class InvoiceDocument extends Document
+{
+    public static ?string $view = 'pdf.invoice';
+    public static ?string $disk = 'documents';
+
+    public function __construct(public Invoice $invoice) {}
+
+    public function path(): string
+    {
+        return "invoices/{$this->invoice->getKey()}.pdf";
+    }
+
+    public function data(): array
+    {
+        return ['invoice' => $this->invoice];
+    }
+}
+
+$document = new InvoiceDocument($invoice);
+$job = Documents::makeJobIfChanged($document);
+
+if ($job !== null) {
+    dispatch($job);
+}
+```
 
 ## Anti-patterns
 
-- do not document package internals here; keep the skill focused on adoption in Laravel apps
+- Do not serialize a `Document`, Eloquent model, concrete PDF driver, or storage
+  service in a document job.
+- Do not pass the original document to publication after generating it; pass the
+  `GeneratedDocument` to avoid repeating work. Explicit publication repeats and
+  queue retries can still write again; there is no exactly-once queue guarantee.
+- Do not assume snapshot comparison detects external PDF deletion, unversioned
+  asset changes, or configuration changes under the same identifier.
+- Do not treat a unique job's discarded duplicate ID as a queued generation.
+- Do not batch unique jobs or use synchronous database-backed batches for the
+  optional versioned-storage integration.

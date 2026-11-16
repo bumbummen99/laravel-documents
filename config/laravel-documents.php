@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 return [
 
-    'placeholder' => 'default',
+    'snapshot_cache' => [
+        'store' => null,
+        'lock_seconds' => 300,
+        'lock_wait_seconds' => 30,
+    ],
 
 ];
