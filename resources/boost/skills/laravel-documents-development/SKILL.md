@@ -52,7 +52,9 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
 - Configure a shared persistent cache with atomic locks under
   `laravel-documents.snapshot_cache`. The lock duration must exceed the storage
   write. Laravel's default cache must also have shared atomic locks for unique
-  jobs and disk writes. Comparison and dispatch are not atomic.
+  jobs and disk writes. Partial nested configuration retains omitted defaults.
+  Lock-release failures are reported without failing completed writes or masking
+  original storage exceptions. Comparison and dispatch are not atomic.
 - Publish `laravel-documents-config` to customize cache settings. The base
   package has no migrations.
 

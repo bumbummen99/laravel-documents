@@ -7,6 +7,7 @@ use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Contracts\Cache\Store;
+use Illuminate\Filesystem\FilesystemAdapter;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Exceptions;
@@ -225,6 +226,85 @@ it('reports a disk lock release error after writing without failing the job', fu
     Event::assertNotDispatched(DocumentRenderFailed::class);
     Exceptions::assertReported(fn (RuntimeException $exception) => $exception->getMessage() === 'Disk lock release failed.');
 });
+
+it('reports a false lock release without retrying a stored document or forcing the lock', function (string $stage) {
+    $store = app(FailingSnapshotCacheStore::class);
+    $store->failRelease = true;
+    Exceptions::fake();
+    Event::fake([DocumentStored::class, DocumentRenderFailed::class]);
+
+    if ($stage === 'snapshot') {
+        $storage = Mockery::mock(DocumentStorage::class);
+        $storage->shouldReceive('write')->once()->andReturn('version-1');
+        app(DocumentStorageManager::class)->register('release-test', fn () => $storage);
+        $rendered = cachedSnapshot('stored', 'release-test');
+        $version = 'version-1';
+        $lockKey = 'laravel_documents:snapshot:'.hash('sha256', $rendered->target->context->identity()).':lock';
+        $message = 'Failed to release the document snapshot lock.';
+    } else {
+        Config::set('cache.default', 'snapshot-test');
+        Config::set('laravel-documents.snapshot_cache.store', 'array');
+        $rendered = cachedSnapshot('stored');
+        $version = null;
+        $lockKey = DiskDocumentStorage::writeLockKey($rendered->target->context);
+        $message = 'Failed to release the disk document write lock.';
+    }
+
+    $job = (new GenerateVersionedDocument($rendered))->withGenerator(HtmlDocumentGenerator::class);
+    $job->handle();
+
+    expect($job->generated())->toBeTrue()
+        ->and($job->version())->toBe($version)
+        ->and(app(DocumentSnapshotCache::class)->changed($rendered))->toBeFalse()
+        ->and($store->locks)->toHaveKey($lockKey);
+
+    if ($stage === 'disk') {
+        expect(Storage::disk('documents')->get('invoices/cache.pdf'))->toBe('stored');
+    }
+
+    Event::assertDispatchedOnce(DocumentStored::class);
+    Event::assertDispatched(DocumentStored::class, fn (DocumentStored $event) => $event->version === $version);
+    Event::assertNotDispatched(DocumentRenderFailed::class);
+    Exceptions::assertReported(fn (RuntimeException $exception) => $exception->getMessage() === $message);
+})->with(['snapshot', 'disk']);
+
+it('preserves the write exception when releasing its lock also fails', function (string $stage, bool $throws) {
+    $store = app(FailingSnapshotCacheStore::class);
+    $store->failRelease = ! $throws;
+    $store->throwOnRelease = $throws;
+    Exceptions::fake();
+    Event::fake([DocumentStored::class, DocumentRenderFailed::class]);
+    $storageFailure = new RuntimeException('Original storage failure.');
+
+    if ($stage === 'snapshot') {
+        $storage = Mockery::mock(DocumentStorage::class);
+        $storage->shouldReceive('write')->once()->andThrow($storageFailure);
+        app(DocumentStorageManager::class)->register('release-test', fn () => $storage);
+        $rendered = cachedSnapshot('failed', 'release-test');
+        $message = 'Failed to release the document snapshot lock.';
+    } else {
+        Config::set('cache.default', 'snapshot-test');
+        Config::set('laravel-documents.snapshot_cache.store', 'array');
+        $files = Mockery::mock(FilesystemAdapter::class);
+        $files->shouldReceive('put')->once()->andThrow($storageFailure);
+        Storage::shouldReceive('disk')->once()->with('documents')->andReturn($files);
+        $rendered = cachedSnapshot('failed');
+        $message = 'Failed to release the disk document write lock.';
+    }
+
+    $job = (new GenerateVersionedDocument($rendered))->withGenerator(HtmlDocumentGenerator::class);
+
+    expect(fn () => $job->handle())->toThrow(RuntimeException::class, 'Original storage failure.')
+        ->and($job->generated())->toBeFalse()
+        ->and(app(DocumentSnapshotCache::class)->changed($rendered))->toBeTrue();
+    Exceptions::assertReported(fn (RuntimeException $exception) => $exception->getMessage() === ($throws ? 'Lock release threw.' : $message));
+    Event::assertNotDispatched(DocumentStored::class);
+    Event::assertDispatchedOnce(DocumentRenderFailed::class);
+    Event::assertDispatched(DocumentRenderFailed::class, fn (DocumentRenderFailed $event) => $event->message === 'Original storage failure.');
+})->with(['snapshot', 'disk'])->with([
+    'returns false' => [false],
+    'throws' => [true],
+]);
 
 it('rejects a null cache store before writing a document', function () {
     Config::set('cache.stores.snapshot-null', ['driver' => 'null']);

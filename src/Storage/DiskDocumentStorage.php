@@ -40,26 +40,21 @@ class DiskDocumentStorage implements Contracts\DocumentStorage
             throw new LogicException('Disk document storage requires a default cache store with atomic locks.');
         }
 
-        $written = false;
         $lock = $store->lock(static::writeLockKey($context), $this->lockTimeout);
         $lock->block($this->lockTimeout * 2);
 
         try {
+            if (! Storage::disk($context->disk)->put($context->path, $contents)) {
+                throw new RuntimeException('Failed to write the generated PDF.');
+            }
+        } finally {
             try {
-                if (! Storage::disk($context->disk)->put($context->path, $contents)) {
-                    throw new RuntimeException('Failed to write the generated PDF.');
+                if (! $lock->release()) {
+                    throw new RuntimeException('Failed to release the disk document write lock.');
                 }
-
-                $written = true;
-            } finally {
-                $lock->release();
+            } catch (Throwable $exception) {
+                report($exception);
             }
-        } catch (Throwable $exception) {
-            if (! $written) {
-                throw $exception;
-            }
-
-            report($exception);
         }
 
         return null;

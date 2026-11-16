@@ -40,40 +40,33 @@ final class DocumentSnapshotCache
         $waitSeconds = $this->positiveInteger('lock_wait_seconds');
         $key = $this->key($generated->target);
         $fingerprint = $generated->fingerprint;
-        $stored = false;
-        $version = null;
         $lock = $lockProvider->lock($key.':lock', $lockSeconds);
         $lock->block($waitSeconds);
 
         try {
+            if ($store->has($key) && ! $store->forget($key)) {
+                throw new RuntimeException('Failed to invalidate the previous document snapshot.');
+            }
+
+            $version = $write();
+
             try {
-                if ($store->has($key) && ! $store->forget($key)) {
-                    throw new RuntimeException('Failed to invalidate the previous document snapshot.');
+                if (! $store->forever($key, $fingerprint)) {
+                    throw new RuntimeException('Failed to cache the stored document snapshot.');
                 }
-
-                $version = $write();
-                $stored = true;
-
-                try {
-                    if (! $store->forever($key, $fingerprint)) {
-                        throw new RuntimeException('Failed to cache the stored document snapshot.');
-                    }
-                } catch (Throwable $exception) {
-                    report($exception);
-                }
-
-                return $version;
-            } finally {
-                $lock->release();
+            } catch (Throwable $exception) {
+                report($exception);
             }
-        } catch (Throwable $exception) {
-            if (! $stored) {
-                throw $exception;
-            }
-
-            report($exception);
 
             return $version;
+        } finally {
+            try {
+                if (! $lock->release()) {
+                    throw new RuntimeException('Failed to release the document snapshot lock.');
+                }
+            } catch (Throwable $exception) {
+                report($exception);
+            }
         }
     }
 

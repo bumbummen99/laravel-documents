@@ -7,14 +7,18 @@ use Illuminate\Support\ServiceProvider;
 use SkyRaptor\LaravelDocuments\DocumentGenerator;
 use SkyRaptor\LaravelDocuments\DocumentPublisher;
 use SkyRaptor\LaravelDocuments\DocumentSnapshotCache;
+use SkyRaptor\LaravelDocuments\DocumentTarget;
 use SkyRaptor\LaravelDocuments\DocumentWorkflow;
 use SkyRaptor\LaravelDocuments\Facades\Documents;
+use SkyRaptor\LaravelDocuments\GeneratedDocument;
 use SkyRaptor\LaravelDocuments\Jobs\DocumentJobFactory;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateUniqueDocument;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateVersionedDocument;
 use SkyRaptor\LaravelDocuments\LaravelDocumentsServiceProvider;
 use SkyRaptor\LaravelDocuments\Pdf\DocumentPdfDriverManager;
+use SkyRaptor\LaravelDocuments\RenderedDocument;
 use SkyRaptor\LaravelDocuments\Storage\DocumentStorageManager;
+use SkyRaptor\LaravelDocuments\Tests\Fixtures\RecordStorageContext;
 
 it('merges the package configuration', function () {
     expect(config('laravel-documents'))->toBe([
@@ -38,6 +42,32 @@ it('preserves application configuration when registering the package', function 
 
     expect(config('laravel-documents.snapshot_cache'))->toBe($snapshotCache);
 });
+
+it('preserves defaults for partial snapshot cache configuration and can publish', function (array $overrides) {
+    config([
+        'cache.default' => 'array',
+        'laravel-documents.snapshot_cache' => $overrides,
+    ]);
+    (new LaravelDocumentsServiceProvider(app()))->register();
+
+    expect(config('laravel-documents.snapshot_cache'))->toBe(array_replace([
+        'store' => null,
+        'lock_seconds' => 300,
+        'lock_wait_seconds' => 30,
+    ], $overrides));
+
+    $rendered = new RenderedDocument('HTML', new DocumentTarget('records', new RecordStorageContext(42)));
+    $cache = app(DocumentSnapshotCache::class);
+
+    expect($cache->publish(new GeneratedDocument($rendered, 'PDF', 'generation-1'), fn () => 'version-1'))
+        ->toBe('version-1')
+        ->and($cache->changed($rendered))->toBeFalse();
+})->with([
+    'store only' => [['store' => 'array']],
+    'lease only' => [['lock_seconds' => 120]],
+    'wait only' => [['lock_wait_seconds' => 10]],
+    'empty section' => [[]],
+]);
 
 it('registers shared document services', function () {
     foreach ([DocumentSnapshotCache::class, DocumentPdfDriverManager::class, DocumentStorageManager::class] as $service) {

@@ -21,7 +21,7 @@ class LaravelDocumentsServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        $this->mergeConfigFrom(__DIR__.'/../config/laravel-documents.php', 'laravel-documents');
+        $this->replaceConfigRecursivelyFrom(__DIR__.'/../config/laravel-documents.php', 'laravel-documents');
 
         $this->app->singleton(DocumentSnapshotCache::class);
         $this->app->singleton(DocumentStorageManager::class, function (Application $app): DocumentStorageManager {

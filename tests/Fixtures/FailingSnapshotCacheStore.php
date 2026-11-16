@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace SkyRaptor\LaravelDocuments\Tests\Fixtures;
 
+use Illuminate\Cache\ArrayLock;
 use Illuminate\Cache\ArrayStore;
 use RuntimeException;
 
@@ -15,6 +16,10 @@ final class FailingSnapshotCacheStore extends ArrayStore
 
     public bool $failDelete = false;
 
+    public bool $failRelease = false;
+
+    public bool $throwOnRelease = false;
+
     /** @var list<string> */
     public array $lockNames = [];
 
@@ -25,7 +30,26 @@ final class FailingSnapshotCacheStore extends ArrayStore
     {
         $this->lockNames[] = $name;
 
-        return parent::lock($name, $seconds, $owner);
+        return new class($this, $name, $seconds, $owner) extends ArrayLock
+        {
+            public function __construct(
+                private readonly FailingSnapshotCacheStore $cache,
+                string $name,
+                int $seconds,
+                ?string $owner,
+            ) {
+                parent::__construct($cache, $name, $seconds, $owner);
+            }
+
+            public function release()
+            {
+                if ($this->cache->throwOnRelease) {
+                    throw new RuntimeException('Lock release threw.');
+                }
+
+                return $this->cache->failRelease ? false : parent::release();
+            }
+        };
     }
 
     public function forever($key, $value)

@@ -321,6 +321,7 @@ prefix, with atomic lock support; `array` is suitable only for a single process
 and the `null` store is rejected. Set `snapshot_cache.lock_seconds` longer than
 the worst-case storage write and `snapshot_cache.lock_wait_seconds` to an
 appropriate contention timeout. Defaults are 300 and 30 seconds, respectively.
+Partial configuration overrides retain defaults for omitted nested settings.
 Unique-job locks and disk-storage write locks use Laravel's default cache store;
 it must also support atomic locks and be shared across processes.
 
@@ -328,7 +329,9 @@ The lock serializes each target's storage publication and snapshot-cache update;
 PDF generation itself can run concurrently. A failed storage write invalidates
 the previous cached snapshot so a later comparison will regenerate. If caching
 or releasing the lock fails after a successful storage write, the error is
-reported rather than retrying the published job. The comparison and subsequent
+reported rather than retrying the published job. Lock-release failures include
+both exceptions and `false` results; they do not replace an original storage
+exception, and locks are never force-released. The comparison and subsequent
 dispatch are not atomic: simultaneous callers or already-running jobs can still
 produce additional versions. External storage writes do not participate in this
 coordination. A worker crash after storage can also cause a retry.
