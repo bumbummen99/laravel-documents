@@ -36,7 +36,8 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
 - Create jobs with `Documents::makeJob($document)` and dispatch explicitly, or
   use `makeJobIfChanged()` and dispatch its non-null result. Both accept
   `connection:`, `queue:`, and `job:`; the explicit job overrides the document's
-  job, which overrides the storage default.
+  job, which overrides the storage default. Built-in jobs retain their connection
+  and queue defaults for omitted or null overrides.
 - The facade resolves injectable `DocumentWorkflow`; it accepts rendered input
   to skip rendering and generated input for publication to skip generation too.
   The low-level `DocumentGenerator` accepts only `RenderedDocument` and returns
@@ -63,6 +64,10 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   Configure page settings, metadata, and encryption on the builder. Generation
   returns post-processed bytes in `GeneratedDocument::contents` before storage; encryption requires Spatie's
   optional dependencies. Do not render views or load document data in callbacks.
+  Browsershot builder settings are isolated per generation while retaining
+  factory defaults. PDF caching is opt-in via `cache()`; automatic fingerprints
+  include the configuration identifier. Explicit cache keys must distinguish
+  configurations unless sharing cached output is intentional.
 - Select a registered storage with the document's `$storage` identifier.
   `disk` is the default; `versioned` requires
   `skyraptor/laravel-versioned-storage` and its migrations. Version `0.2.0-beta.1`

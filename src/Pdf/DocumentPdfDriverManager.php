@@ -40,7 +40,7 @@ final class DocumentPdfDriverManager
     public function builder(string $name): PdfBuilder
     {
         $configuration = $this->configuration($name);
-        $builder = (new DocumentPdfBuilder)
+        $builder = (new DocumentPdfBuilder($name))
             ->setDriver($this->resolve($name))
             ->margins(0, 0, 0, 0)
             ->dontCache();

@@ -184,6 +184,8 @@ document. A factory can instead return any Spatie `PdfDriver`, including a
 custom implementation; the optional third argument configures a fresh Spatie
 `PdfBuilder`. Use its methods for page settings, metadata, encryption, or
 Browsershot customization. Margins default to zero and can also be changed there.
+Browsershot drivers are cloned for generation so builder settings do not leak
+into shared driver instances; factory-configured defaults are preserved.
 Generation calls `generatePdfContent()`, so metadata and encryption are applied
 before the final bytes are returned or passed to document storage. Encryption
 requires Spatie's optional encryption dependencies. Post-processing failures
@@ -193,7 +195,10 @@ The snapshot supplies the body HTML. Builder callbacks must not load the
 document's data or render views; `view()`, `headerView()`, and `footerView()`
 are rejected. Use previously rendered HTML for any headers or footers.
 Spatie's PDF cache is disabled by default; a callback can explicitly enable it
-with `cache()`.
+with `cache()`. Automatic cache fingerprints include the registered configuration
+identifier as well as Spatie's HTML and builder settings. Explicit cache keys
+are used unchanged; make them unique across configurations unless sharing
+cached output is intentional.
 
 Only the identifier is serialized. The worker resolves its own factory and
 builder configuration, so all processes must register the identifiers they use. Different
@@ -363,6 +368,8 @@ need independent retries. Event delivery is best-effort, not crash-proof.
 `Documents::makeJob()` and `makeJobIfChanged()` choose the explicit `job:` argument,
 then the document's configured job, then the storage configuration's default.
 They also accept `connection:` and `queue:` arguments.
+Built-in jobs preserve their existing connection and queue when the corresponding
+argument is omitted or `null`; non-null arguments override only that setting.
 The lower-level `DocumentJobFactory::make()` accepts a snapshot instead; pass
 `job: $document->job()` to preserve the document's job setting when using it
 directly.

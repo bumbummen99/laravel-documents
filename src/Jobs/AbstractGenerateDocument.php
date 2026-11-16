@@ -114,8 +114,13 @@ abstract class AbstractGenerateDocument implements GenerateDocument
 
     public function configureQueue(?string $connection, ?string $queue): static
     {
-        $this->onConnection($connection);
-        $this->onQueue($queue);
+        if ($connection !== null) {
+            $this->onConnection($connection);
+        }
+
+        if ($queue !== null) {
+            $this->onQueue($queue);
+        }
 
         return $this;
     }

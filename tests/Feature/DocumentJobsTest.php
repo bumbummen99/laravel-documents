@@ -23,6 +23,27 @@ it('configures the requested connection and queue on a snapshot job', function (
         ->and($job->generated())->toBeFalse();
 });
 
+it('preserves custom job queue defaults unless explicitly overridden', function (?string $connection, ?string $queue, string $expectedConnection, string $expectedQueue) {
+    $rendered = new RenderedDocument('HTML', new DocumentTarget('disk', new RecordStorageContext(42)));
+    $prototype = new class($rendered) extends GenerateUniqueDocument
+    {
+        public function __construct(RenderedDocument $rendered)
+        {
+            parent::__construct($rendered);
+            $this->onConnection('redis')->onQueue('documents');
+        }
+    };
+    $job = app(DocumentJobFactory::class)->make($rendered, connection: $connection, queue: $queue, job: $prototype::class);
+
+    expect($job->connection)->toBe($expectedConnection)
+        ->and($job->queue)->toBe($expectedQueue);
+})->with([
+    'no overrides' => [null, null, 'redis', 'documents'],
+    'connection only' => ['sqs', null, 'sqs', 'documents'],
+    'queue only' => [null, 'pdf', 'redis', 'pdf'],
+    'both overrides' => ['sqs', 'pdf', 'sqs', 'pdf'],
+]);
+
 it('uses the custom context identity for unique IDs and stable target locks', function () {
     $context = new RecordStorageContext(42);
     $job = new GenerateUniqueDocument(new RenderedDocument('HTML', new DocumentTarget('records', $context)));

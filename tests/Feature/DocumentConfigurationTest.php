@@ -13,8 +13,12 @@ use SkyRaptor\LaravelDocuments\Storage\VersionedDocumentStorage;
 use SkyRaptor\LaravelDocuments\Tests\Fixtures\ConfiguredPdfDriver;
 use SkyRaptor\LaravelDocuments\Tests\Fixtures\RecordStorageContext;
 use SkyRaptor\LaravelVersionedStorage\VersionedStorage;
+use Spatie\Browsershot\Browsershot;
+use Spatie\LaravelPdf\Drivers\BrowsershotDriver;
 use Spatie\LaravelPdf\Drivers\PdfDriver;
 use Spatie\LaravelPdf\PdfBuilder;
+use Spatie\LaravelPdf\PdfOptions;
+use Spatie\LaravelPdf\PdfServiceProvider;
 
 it('rejects an empty PDF configuration name', function () {
     expect(fn () => app(DocumentPdfDriverManager::class)->register('', fn () => new ConfiguredPdfDriver('test')))
@@ -54,6 +58,106 @@ it('creates an independent configured PDF builder for each generation', function
     expect($second)->not->toBe($first)
         ->and($second->format)->toBe('A4')
         ->and($second->metadata?->title)->toBe('Invoice');
+});
+
+it('isolates shared Browsershot settings while preserving factory defaults', function (bool $selectNamedDriver, bool $failCustomized) {
+    $driver = new class extends BrowsershotDriver
+    {
+        public function generatePdf(string $html, ?string $headerHtml, ?string $footerHtml, PdfOptions $options): string
+        {
+            $browser = Browsershot::html($html);
+
+            if ($this->customizeBrowsershot !== null) {
+                ($this->customizeBrowsershot)($browser);
+            }
+
+            $settings = (new ReflectionProperty(Browsershot::class, 'additionalOptions'))->getValue($browser);
+
+            return ($this->onLambda ? 'lambda:' : 'local:').$settings['marker'];
+        }
+    };
+    $driver->customizeBrowsershot(fn (Browsershot $browser) => $browser->setOption('marker', 'factory'));
+    app()->instance(PdfDriver::class, $driver);
+    app()->instance('laravel-pdf.driver.shared', $driver);
+    $manager = app(DocumentPdfDriverManager::class);
+    $configure = function (PdfBuilder $builder) use ($selectNamedDriver): void {
+        if ($selectNamedDriver) {
+            $builder->driver('shared');
+        }
+    };
+    $manager->register('plain', fn () => app(PdfDriver::class), $configure);
+    $manager->register('customized', fn () => app(PdfDriver::class), function (PdfBuilder $builder) use ($configure, $failCustomized): void {
+        $configure($builder);
+        $builder->onLambda()->withBrowsershot(function (Browsershot $browser) use ($failCustomized): void {
+            if ($failCustomized) {
+                throw new RuntimeException('Browsershot customization failed.');
+            }
+
+            $browser->setOption('marker', 'builder');
+        });
+    });
+
+    expect($manager->builder('plain')->html('HTML')->generatePdfContent())->toBe('local:factory');
+
+    for ($attempt = 0; $attempt < 2; $attempt++) {
+        if ($failCustomized) {
+            expect(fn () => $manager->builder('customized')->html('HTML')->generatePdfContent())
+                ->toThrow(RuntimeException::class, 'Browsershot customization failed.');
+        } else {
+            expect($manager->builder('customized')->html('HTML')->generatePdfContent())->toBe('lambda:builder');
+        }
+
+        expect($manager->builder('plain')->html('HTML')->generatePdfContent())->toBe('local:factory');
+    }
+
+    expect($driver->generatePdf('HTML', null, null, new PdfOptions))->toBe('local:factory');
+})->with([
+    'factory driver' => [false],
+    'builder-selected driver' => [true],
+])->with([
+    'successful generation' => [false],
+    'failed generation' => [true],
+]);
+
+it('isolates automatic PDF caches between registered configurations', function () {
+    $this->app->register(PdfServiceProvider::class);
+    config(['laravel-pdf.cache.store' => 'array']);
+    $manager = app(DocumentPdfDriverManager::class);
+
+    foreach (['alpha', 'beta'] as $name) {
+        $driver = Mockery::mock(PdfDriver::class);
+        $driver->shouldReceive('generatePdf')->once()->andReturn($name.' PDF');
+        $manager->register($name, fn () => $driver, fn (PdfBuilder $builder) => $builder->cache());
+    }
+
+    foreach (['alpha', 'beta', 'alpha', 'beta'] as $name) {
+        expect($manager->builder($name)->html('same HTML')->generatePdfContent())->toBe($name.' PDF');
+    }
+});
+
+it('keeps HTML and builder options in automatic PDF cache fingerprints', function () {
+    $this->app->register(PdfServiceProvider::class);
+    config(['laravel-pdf.cache.store' => 'array']);
+    $manager = app(DocumentPdfDriverManager::class);
+    $manager->register('cached', fn () => new ConfiguredPdfDriver('cached'), fn (PdfBuilder $builder) => $builder->cache());
+
+    foreach ([['first', 'A4'], ['second', 'A4'], ['first', 'Letter'], ['first', 'A4']] as [$html, $format]) {
+        expect($manager->builder('cached')->html($html)->format($format)->generatePdfContent())
+            ->toBe("cached:{$format}:{$html}");
+    }
+});
+
+it('preserves explicit PDF cache keys', function () {
+    $this->app->register(PdfServiceProvider::class);
+    config(['laravel-pdf.cache.store' => 'array', 'laravel-pdf.cache.prefix' => 'documents-test']);
+    $manager = app(DocumentPdfDriverManager::class);
+    $driver = Mockery::mock(PdfDriver::class);
+    $driver->shouldReceive('generatePdf')->once()->andReturn('PDF');
+    $manager->register('cached', fn () => $driver, fn (PdfBuilder $builder) => $builder->cache(key: 'explicit-key'));
+
+    expect($manager->builder('cached')->html('HTML')->generatePdfContent())->toBe('PDF')
+        ->and($manager->builder('cached')->html('HTML')->generatePdfContent())->toBe('PDF')
+        ->and(app('cache')->store('array')->has('documents-test:explicit-key'))->toBeTrue();
 });
 
 it('rejects invalid storage registrations', function (string $name, string $job) {
