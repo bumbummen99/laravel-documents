@@ -6,7 +6,7 @@
     <a href="https://packagist.org/packages/skyraptor/laravel-documents"><img src="https://img.shields.io/packagist/v/skyraptor/laravel-documents.svg?style=flat-square" alt="Packagist"></a>
     <a href="https://packagist.org/packages/skyraptor/laravel-documents"><img src="https://img.shields.io/packagist/php-v/skyraptor/laravel-documents.svg?style=flat-square" alt="PHP from Packagist"></a>
     <a href="https://packagist.org/packages/skyraptor/laravel-documents"><img src="https://badge.laravel.cloud/badge/skyraptor/laravel-documents?style=flat" alt="Laravel versions"></a>
-    <a href="https://github.com/skyraptor/laravel-documents/actions"><img alt="GitHub Workflow Status (main)" src="https://img.shields.io/github/actions/workflow/status/skyraptor/laravel-documents/tests.yml?branch=main&label=Tests&style=flat-square"></a>
+    <a href="https://github.com/bumbummen99/laravel-documents/actions"><img alt="GitHub Workflow Status (master)" src="https://img.shields.io/github/actions/workflow/status/bumbummen99/laravel-documents/tests.yml?branch=master&label=Tests&style=flat-square"></a>
     <a href="https://packagist.org/packages/skyraptor/laravel-documents"><img src="https://img.shields.io/packagist/dt/skyraptor/laravel-documents.svg?style=flat-square" alt="Total Downloads"></a>
 </p>
 
