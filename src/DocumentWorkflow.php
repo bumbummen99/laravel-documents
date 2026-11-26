@@ -36,15 +36,28 @@ class DocumentWorkflow
      */
     public function publish(Document|RenderedDocument|GeneratedDocument $document, ?string $generationId = null): ?string
     {
+        return $this->publisher->publish($this->prepareForPublication($document, $generationId));
+    }
+
+    /**
+     * Complete missing stages and report whether the PDF was published.
+     */
+    public function publishWithResult(Document|RenderedDocument|GeneratedDocument $document, ?string $generationId = null): DocumentPublicationResult
+    {
+        return $this->publisher->publishWithResult($this->prepareForPublication($document, $generationId));
+    }
+
+    private function prepareForPublication(Document|RenderedDocument|GeneratedDocument $document, ?string $generationId): GeneratedDocument
+    {
         if ($document instanceof GeneratedDocument) {
             if ($generationId !== null && $generationId !== $document->generationId) {
                 throw new InvalidArgumentException('A generated document already has a generation ID; it cannot be replaced.');
             }
 
-            return $this->publisher->publish($document);
+            return $document;
         }
 
-        return $this->publisher->publish($this->generate($document, $generationId));
+        return $this->generate($document, $generationId);
     }
 
     /**

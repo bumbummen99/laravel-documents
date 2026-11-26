@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\View;
 use SkyRaptor\LaravelDocuments\DocumentGenerator;
+use SkyRaptor\LaravelDocuments\DocumentPublicationStatus;
 use SkyRaptor\LaravelDocuments\DocumentPublisher;
 use SkyRaptor\LaravelDocuments\Documents\Document;
 use SkyRaptor\LaravelDocuments\DocumentSnapshotCache;
@@ -58,6 +59,20 @@ it('publishes through the facade without making consumers capture a render', fun
     expect(Documents::publish($document, generationId: 'workflow-generation'))->toBeNull()
         ->and($document->get())->toContain('<h1>Invoice 42</h1>')
         ->and(app(DocumentSnapshotCache::class)->changed($document->render()))->toBeFalse();
+    Event::assertDispatched(DocumentStored::class, fn (DocumentStored $event) => $event->generationId === 'workflow-generation');
+});
+
+it('publishes a document through the explicit outcome API with the supplied generation ID', function () {
+    View::addLocation(__DIR__.'/../Fixtures/views');
+    Event::fake([DocumentStored::class]);
+    $document = new InvoiceDocument(42);
+
+    $result = Documents::publishWithResult($document, generationId: 'workflow-generation');
+
+    expect($result->status)->toBe(DocumentPublicationStatus::Published)
+        ->and($result->version)->toBeNull()
+        ->and($document->get())->toContain('<h1>Invoice 42</h1>');
+    Event::assertDispatchedOnce(DocumentStored::class);
     Event::assertDispatched(DocumentStored::class, fn (DocumentStored $event) => $event->generationId === 'workflow-generation');
 });
 

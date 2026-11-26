@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Storage;
 use SkyRaptor\LaravelDocuments\DocumentGenerator;
+use SkyRaptor\LaravelDocuments\DocumentPublicationStatus;
 use SkyRaptor\LaravelDocuments\DocumentPublisher;
 use SkyRaptor\LaravelDocuments\Documents\Document;
 use SkyRaptor\LaravelDocuments\DocumentSnapshotCache;
@@ -113,6 +114,49 @@ it('publishes a serialized generation result without a generator or driver confi
 
     expect(Storage::disk('documents')->get('invoice.pdf'))->toBe('already generated')
         ->and(app(DocumentSnapshotCache::class)->changed($rendered))->toBeFalse();
+});
+
+it('publishes an existing generated result with an explicit outcome without generating again', function () {
+    $rendered = new RenderedDocument('frozen', new DocumentTarget(
+        'disk',
+        new FilesystemDocumentStorageContext('invoice.pdf', 'documents'),
+    ));
+    $generated = new GeneratedDocument($rendered, 'already generated', 'generation-1');
+    $generator = Mockery::mock(DocumentGenerator::class);
+    $generator->shouldNotReceive('generate');
+    app()->instance(DocumentGenerator::class, $generator);
+    Event::fake([DocumentStored::class]);
+
+    $result = Documents::publishWithResult($generated, generationId: 'generation-1');
+
+    expect($result->status)->toBe(DocumentPublicationStatus::Published)
+        ->and($result->version)->toBeNull()
+        ->and(Storage::disk('documents')->get('invoice.pdf'))->toBe('already generated');
+    Event::assertDispatchedOnce(DocumentStored::class);
+    expect(fn () => Documents::publishWithResult($generated, generationId: 'different'))
+        ->toThrow(InvalidArgumentException::class, 'it cannot be replaced');
+});
+
+it('reports low-level publication outcomes and propagates storage failures', function () {
+    $rendered = new RenderedDocument('frozen', new DocumentTarget(
+        'failing',
+        new FilesystemDocumentStorageContext('invoice.pdf', 'documents'),
+    ));
+    $generated = new GeneratedDocument($rendered, 'PDF', 'generation-1');
+    $storage = Mockery::mock(DocumentStorage::class);
+    $storage->shouldReceive('write')->once()->andThrow(new RuntimeException('Storage unavailable.'));
+    $storage->shouldReceive('write')->once()->andReturn('version-1');
+    app(DocumentStorageManager::class)->register('failing', fn () => $storage);
+    Event::fake([DocumentStored::class, DocumentRenderFailed::class]);
+    $publisher = app(DocumentPublisher::class);
+
+    expect(fn () => $publisher->publishWithResult($generated))->toThrow(RuntimeException::class, 'Storage unavailable.');
+    $result = $publisher->publishWithResult($generated);
+
+    expect($result->status)->toBe(DocumentPublicationStatus::Published)
+        ->and($result->version)->toBe('version-1');
+    Event::assertDispatchedOnce(DocumentRenderFailed::class);
+    Event::assertDispatchedOnce(DocumentStored::class);
 });
 
 it('rejects publishing a merely rendered document through the publisher', function () {

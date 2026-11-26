@@ -42,6 +42,12 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   to skip rendering and generated input for publication to skip generation too.
   The low-level `DocumentGenerator` accepts only `RenderedDocument` and returns
   `GeneratedDocument`; `DocumentPublisher` accepts only `GeneratedDocument`.
+- Use `Documents::publishWithResult()` (or the publisher's method for generated
+  input) to distinguish `DocumentPublicationStatus::Published` from
+  `Superseded`. The result's `version` may be null even when published; failures
+  still throw. Existing `publish()` returns null for either an unversioned write
+  or a superseded attempt. An outcome describes the attempt, not the target's
+  future availability or freshness; map it to an HTTP response in the application.
   Application tests can mock the facade with `Documents::shouldReceive(...)`.
 - Read the current PDF with `get()` and check it with `exists()`; these do not
   render the view. A queued job contains the snapshot, not the document or model.
@@ -69,7 +75,7 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   A later return to an earlier fingerprint does not revive its original ID.
   Existing snapshots keep their ordering when reused or serialized; IDs do not change fingerprints.
   Superseded publication skips storage and emits `DocumentSuperseded`, returning
-  null. A different newer render supersedes old work even if never dispatched or failed.
+  null from `publish()`. A different newer render supersedes old work even if never dispatched or failed.
   Missing cache markers fail explicitly; render a fresh snapshot to recover.
   Opt in consistently across HTTP and workers; untracked legacy/opted-out
   snapshots retain publication-order behavior.

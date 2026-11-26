@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Storage;
 use SkyRaptor\LaravelDocuments\DocumentGenerator;
+use SkyRaptor\LaravelDocuments\DocumentPublicationStatus;
 use SkyRaptor\LaravelDocuments\DocumentPublisher;
 use SkyRaptor\LaravelDocuments\Documents\Document;
 use SkyRaptor\LaravelDocuments\DocumentSnapshotCache;
@@ -79,6 +80,44 @@ it('checks supersession for custom version-returning storage without creating st
         ->and(app(DocumentSnapshotCache::class)->changed($newer))->toBeFalse();
     Event::assertDispatchedOnce(DocumentStored::class);
     Event::assertDispatchedOnce(DocumentSuperseded::class);
+});
+
+it('distinguishes a superseded publication from an already stored matching PDF', function () {
+    $older = latestSnapshot('A');
+    Documents::publish($older);
+    $newer = latestSnapshot('B');
+    Event::fake([DocumentStored::class, DocumentSuperseded::class]);
+
+    $result = Documents::publishWithResult($older);
+
+    expect($result->status)->toBe(DocumentPublicationStatus::Superseded)
+        ->and($result->version)->toBeNull()
+        ->and(Storage::disk('documents')->get('latest.pdf'))->toBe('A')
+        ->and(app(DocumentSnapshotCache::class)->changed($older))->toBeFalse()
+        ->and(app(DocumentSnapshotCache::class)->changed($newer))->toBeTrue();
+    Event::assertNotDispatched(DocumentStored::class);
+    Event::assertDispatchedOnce(DocumentSuperseded::class);
+});
+
+it('reports successful unversioned publication separately from supersession', function () {
+    $result = Documents::publishWithResult(latestSnapshot('current'));
+
+    expect($result->status)->toBe(DocumentPublicationStatus::Published)
+        ->and($result->version)->toBeNull()
+        ->and(Storage::disk('documents')->get('latest.pdf'))->toBe('current');
+});
+
+it('reports the version of a successful publication', function () {
+    $target = new DocumentTarget('custom', new FilesystemDocumentStorageContext('latest.pdf', 'documents'));
+    $rendered = new RenderedDocument('current', $target, latestSnapshotWins: true);
+    $storage = Mockery::mock(DocumentStorage::class);
+    $storage->shouldReceive('write')->once()->with($target->context, 'current')->andReturn('version-current');
+    app(DocumentStorageManager::class)->register('custom', fn () => $storage, GenerateVersionedDocument::class);
+
+    $result = Documents::publishWithResult($rendered);
+
+    expect($result->status)->toBe(DocumentPublicationStatus::Published)
+        ->and($result->version)->toBe('version-current');
 });
 
 it('supersedes an older result even when the newer snapshot is never generated or dispatched', function () {
