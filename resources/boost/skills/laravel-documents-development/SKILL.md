@@ -64,10 +64,12 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   set `public static ?bool $latestSnapshotWins = true` on the document or
   `laravel-documents.latest_snapshot_wins` globally. Null inherits; false opts
   out. Snapshot construction registers an immutable ID after HTML rendering,
-  using the shared snapshot-cache publication lock. Existing snapshots keep
-  their ordering when reused or serialized; IDs do not change fingerprints.
+  using the shared snapshot-cache publication lock. Consecutive identical
+  fingerprints share an ID; a different fingerprint supersedes the earlier one.
+  A later return to an earlier fingerprint does not revive its original ID.
+  Existing snapshots keep their ordering when reused or serialized; IDs do not change fingerprints.
   Superseded publication skips storage and emits `DocumentSuperseded`, returning
-  null. A newer render supersedes old work even if never dispatched or failed.
+  null. A different newer render supersedes old work even if never dispatched or failed.
   Missing cache markers fail explicitly; render a fresh snapshot to recover.
   Opt in consistently across HTTP and workers; untracked legacy/opted-out
   snapshots retain publication-order behavior.

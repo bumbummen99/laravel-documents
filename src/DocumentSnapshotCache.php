@@ -20,12 +20,26 @@ final class DocumentSnapshotCache
     public function __construct(private readonly CacheManager $cache) {}
 
     /**
-     * Record a new rendered request under the same lock used for publication.
+     * Record a rendered fingerprint under the same lock used for publication.
      */
-    public function register(DocumentTarget $target): string
+    public function register(DocumentTarget $target, ?string $fingerprint = null): string
     {
-        return $this->withTargetLock($target, function (Repository $store, string $key): string {
+        return $this->withTargetLock($target, function (Repository $store, string $key) use ($fingerprint): string {
+            $latest = $store->get($key.':latest');
+
+            if ($fingerprint !== null && is_string($latest)) {
+                [$id, $registeredFingerprint] = array_pad(explode(':', $latest, 2), 2, null);
+
+                if (Str::isUuid($id) && $registeredFingerprint === $fingerprint) {
+                    return $latest;
+                }
+            }
+
             $snapshotId = (string) Str::uuid();
+
+            if ($fingerprint !== null) {
+                $snapshotId .= ':'.$fingerprint;
+            }
 
             if (! $store->forever($key.':latest', $snapshotId)) {
                 throw new RuntimeException('Failed to register the latest document snapshot.');
