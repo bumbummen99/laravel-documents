@@ -7,6 +7,7 @@ namespace SkyRaptor\LaravelDocuments;
 use SkyRaptor\LaravelDocuments\Events\DispatchesDocumentEvents;
 use SkyRaptor\LaravelDocuments\Events\DocumentRenderFailed;
 use SkyRaptor\LaravelDocuments\Events\DocumentStored;
+use SkyRaptor\LaravelDocuments\Events\DocumentSuperseded;
 use SkyRaptor\LaravelDocuments\Storage\DocumentStorageManager;
 use Throwable;
 
@@ -24,6 +25,7 @@ class DocumentPublisher
 
     /**
      * Store the generated contents, returning their version for versioned storage.
+     * Superseded publication returns null without storing.
      */
     public function publish(GeneratedDocument $generated): ?string
     {
@@ -34,6 +36,14 @@ class DocumentPublisher
             $version = $this->snapshots->publish(
                 $generated,
                 fn () => $storage->write($target->context, $generated->contents),
+                function (string $latestSnapshotId) use ($generated, $target): void {
+                    $this->dispatchDocumentEvent(new DocumentSuperseded(
+                        $target,
+                        $generated->generationId,
+                        $generated->snapshotId,
+                        $latestSnapshotId,
+                    ));
+                },
             );
         } catch (Throwable $exception) {
             $this->dispatchDocumentEvent(new DocumentRenderFailed(
@@ -44,6 +54,10 @@ class DocumentPublisher
             ));
 
             throw $exception;
+        }
+
+        if ($version === false) {
+            return null;
         }
 
         $this->dispatchDocumentEvent(new DocumentStored($target, $generated->generationId, $version));

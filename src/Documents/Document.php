@@ -27,6 +27,7 @@ abstract class Document
 {
     use Concerns\HasDisk;
     use Concerns\HasJob;
+    use Concerns\HasLatestSnapshotWins;
     use Concerns\HasPath;
     use Concerns\HasPdfDriver;
     use Concerns\HasStorage;
@@ -64,6 +65,7 @@ abstract class Document
             html: $this->html(),
             target: $this->target(),
             driver: $this->pdfDriver(),
+            latestSnapshotWins: $this->latestSnapshotWins(),
         );
     }
 

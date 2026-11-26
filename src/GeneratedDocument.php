@@ -16,6 +16,8 @@ final readonly class GeneratedDocument
 
     public string $fingerprint;
 
+    public ?string $snapshotId;
+
     public function __construct(
         RenderedDocument $rendered,
         public string $contents,
@@ -27,5 +29,6 @@ final readonly class GeneratedDocument
 
         $this->target = $rendered->target;
         $this->fingerprint = $rendered->fingerprint();
+        $this->snapshotId = $rendered->snapshotId ?? null;
     }
 }

@@ -13,6 +13,11 @@ use InvalidArgumentException;
  */
 final readonly class RenderedDocument
 {
+    /**
+     * Publication ordering identity, or null when the policy is disabled.
+     */
+    public ?string $snapshotId;
+
     public function __construct(
         /**
          * The rendered HTML of the document.
@@ -26,10 +31,21 @@ final readonly class RenderedDocument
          * The registered PDF driver configuration.
          */
         public string $driver = 'default',
+        ?bool $latestSnapshotWins = null,
     ) {
         if ($driver === '') {
             throw new InvalidArgumentException('The document PDF driver configuration cannot be empty.');
         }
+
+        $latestSnapshotWins ??= config('laravel-documents.latest_snapshot_wins', false);
+
+        if (! is_bool($latestSnapshotWins)) {
+            throw new InvalidArgumentException('The latest snapshot wins option must be a boolean.');
+        }
+
+        $this->snapshotId = $latestSnapshotWins
+            ? app(DocumentSnapshotCache::class)->register($this->target)
+            : null;
     }
 
     public function fingerprint(): string

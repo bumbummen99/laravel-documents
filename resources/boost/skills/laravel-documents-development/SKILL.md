@@ -60,6 +60,17 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   original storage exceptions. Comparison and dispatch are not atomic.
 - Publish `laravel-documents-config` to customize cache settings. The base
   package has no migrations.
+- To prevent old queued snapshots from overwriting newer HTTP publications,
+  set `public static ?bool $latestSnapshotWins = true` on the document or
+  `laravel-documents.latest_snapshot_wins` globally. Null inherits; false opts
+  out. Snapshot construction registers an immutable ID after HTML rendering,
+  using the shared snapshot-cache publication lock. Existing snapshots keep
+  their ordering when reused or serialized; IDs do not change fingerprints.
+  Superseded publication skips storage and emits `DocumentSuperseded`, returning
+  null. A newer render supersedes old work even if never dispatched or failed.
+  Missing cache markers fail explicitly; render a fresh snapshot to recover.
+  Opt in consistently across HTTP and workers; untracked legacy/opted-out
+  snapshots retain publication-order behavior.
 
 ### 3. Configure integrations
 
@@ -84,9 +95,9 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
 - Register the same configuration identifiers in every application and worker.
   Concrete drivers and storage services must not be put into snapshots or jobs.
   Different deployments may resolve the same identifier differently.
-- Listen to `DocumentRendering`, `DocumentStored`, and `DocumentRenderFailed`
+- Listen to `DocumentRendering`, `DocumentStored`, `DocumentSuperseded`, and `DocumentRenderFailed`
   for lifecycle attempts. Generation emits `DocumentRendering` even without
-  publication; publication emits only stored/failure events. Correlate results
+  publication; publication emits stored/superseded/failure events. Correlate results
   and events using `generationId`, or jobs using `generationId()`. Listener
   exceptions are reported and do not change the stored result.
 - Custom generators extend `DocumentGenerator` and override
@@ -101,7 +112,13 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   retries may overwrite the PDF or publish another version.
 - Unique jobs cannot be batched. Batch versioned jobs only with an asynchronous
   queue and storage that supports multiple writes. The last published version,
-  not necessarily the last dispatched or completed job, becomes current.
+  not necessarily the last dispatched or completed job, becomes current unless
+  latest-snapshot-wins rejects superseded publication.
+- Latest-snapshot-wins does not change unique dispatch locks. A discarded newer
+  job can still supersede older work. Select non-unique `GenerateVersionedDocument`
+  (also supported with disk storage), its progress equivalent, or a custom job
+  when every newer snapshot must be queued. `generated()` includes completed
+  superseded attempts; use `DocumentStored` as the storage notification.
 - Custom unique jobs using `SerializesModels` release their shared target lock
   when a missing related model causes Laravel to delete or fail the job. Keep
   models out of the frozen document input.

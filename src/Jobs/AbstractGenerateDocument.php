@@ -75,7 +75,8 @@ abstract class AbstractGenerateDocument implements GenerateDocument
     }
 
     /**
-     * Determine if this job instance has stored the document.
+     * Determine if generation and the publication attempt completed.
+     * Superseded snapshots complete without being stored.
      */
     public function generated(): bool
     {

@@ -23,6 +23,7 @@ use SkyRaptor\LaravelDocuments\Tests\Fixtures\RecordStorageContext;
 
 it('merges the package configuration', function () {
     expect(config('laravel-documents'))->toBe([
+        'latest_snapshot_wins' => false,
         'snapshot_cache' => [
             'store' => null,
             'lock_seconds' => 300,
@@ -38,10 +39,14 @@ it('preserves application configuration when registering the package', function 
         'lock_wait_seconds' => 10,
     ];
 
-    config(['laravel-documents.snapshot_cache' => $snapshotCache]);
+    config([
+        'laravel-documents.snapshot_cache' => $snapshotCache,
+        'laravel-documents.latest_snapshot_wins' => true,
+    ]);
     (new LaravelDocumentsServiceProvider(app()))->register();
 
-    expect(config('laravel-documents.snapshot_cache'))->toBe($snapshotCache);
+    expect(config('laravel-documents.snapshot_cache'))->toBe($snapshotCache)
+        ->and(config('laravel-documents.latest_snapshot_wins'))->toBeTrue();
 });
 
 it('preserves defaults for partial snapshot cache configuration and can publish', function (array $overrides) {

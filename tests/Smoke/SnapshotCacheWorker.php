@@ -33,8 +33,44 @@ $app->register(CacheServiceProvider::class);
 $rendered = new RenderedDocument($html, new DocumentTarget(
     'disk',
     new FilesystemDocumentStorageContext('same-document.pdf', 'documents'),
-));
+), latestSnapshotWins: $mode === 'capture');
 $cache = $app->make(DocumentSnapshotCache::class);
+
+if ($mode === 'capture') {
+    if (file_put_contents($marker, serialize($rendered)) === false) {
+        throw new RuntimeException('Failed to save the captured worker snapshot.');
+    }
+
+    return;
+}
+
+if ($mode === 'publish-captured') {
+    $payload = file_get_contents($marker);
+
+    if ($payload === false) {
+        throw new RuntimeException('Failed to read the captured worker snapshot.');
+    }
+
+    $captured = unserialize($payload);
+
+    if (! $captured instanceof RenderedDocument) {
+        throw new RuntimeException('The worker payload must contain a rendered document.');
+    }
+
+    $version = $cache->publish(
+        new GeneratedDocument($captured, $captured->html, 'worker-generation'),
+        function () use ($directory, $captured): ?string {
+            if (file_put_contents($directory.'/published.pdf', $captured->html) === false) {
+                throw new RuntimeException('Failed to publish the worker snapshot.');
+            }
+
+            return null;
+        },
+    );
+    echo $version === false ? 'superseded' : 'published';
+
+    return;
+}
 
 if ($mode === 'changed') {
     echo $cache->changed($rendered) ? 'changed' : 'unchanged';

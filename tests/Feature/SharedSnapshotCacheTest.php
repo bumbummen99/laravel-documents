@@ -21,23 +21,22 @@ function waitForWorkerMarker(string $marker, Process $worker): void
     }
 }
 
+function snapshotWorkerAutoload(): string
+{
+    foreach (ClassLoader::getRegisteredLoaders() as $vendorDirectory => $loader) {
+        if ($loader->findFile(RenderedDocument::class) !== false) {
+            return $vendorDirectory.'/autoload.php';
+        }
+    }
+
+    throw new RuntimeException('Cannot find the Composer autoloader for the document package.');
+}
+
 it('coordinates snapshot publications and comparisons across separate processes', function () {
     Storage::fake('documents');
     $directory = Storage::disk('documents')->path('shared-snapshot-cache');
     File::makeDirectory($directory, 0755, true);
-    $autoload = null;
-
-    foreach (ClassLoader::getRegisteredLoaders() as $vendorDirectory => $loader) {
-        if ($loader->findFile(RenderedDocument::class) !== false) {
-            $autoload = $vendorDirectory.'/autoload.php';
-
-            break;
-        }
-    }
-
-    if ($autoload === null) {
-        throw new RuntimeException('Cannot find the Composer autoloader for the document package.');
-    }
+    $autoload = snapshotWorkerAutoload();
     $script = __DIR__.'/../Smoke/SnapshotCacheWorker.php';
     $firstMarker = $directory.'/first';
     $secondMarker = $directory.'/second';
@@ -79,6 +78,32 @@ it('coordinates snapshot publications and comparisons across separate processes'
             $second->stop();
         }
 
+        File::deleteDirectory($directory);
+    }
+});
+
+it('rejects stale serialized snapshots across separate rendering and publication processes', function () {
+    Storage::fake('documents');
+    $directory = Storage::disk('documents')->path('latest-snapshot-cache');
+    File::makeDirectory($directory, 0755, true);
+    $script = __DIR__.'/../Smoke/SnapshotCacheWorker.php';
+    $autoload = snapshotWorkerAutoload();
+
+    try {
+        foreach (['older', 'newer'] as $html) {
+            (new Process([PHP_BINARY, $script, $autoload, $directory, 'capture', $html, $directory.'/'.$html.'.snapshot', '-']))
+                ->mustRun();
+        }
+
+        // Publish the newer HTTP result before the older queued result runs.
+        foreach (['newer' => 'published', 'older' => 'superseded'] as $html => $expected) {
+            $worker = new Process([PHP_BINARY, $script, $autoload, $directory, 'publish-captured', '-', $directory.'/'.$html.'.snapshot', '-']);
+            $worker->mustRun();
+            expect($worker->getOutput())->toBe($expected);
+        }
+
+        expect(File::get($directory.'/published.pdf'))->toBe('newer');
+    } finally {
         File::deleteDirectory($directory);
     }
 });

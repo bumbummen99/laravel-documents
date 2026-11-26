@@ -141,6 +141,7 @@ dispatch(app(DocumentJobFactory::class)->make($rendered, job: $document->job()))
 
 `DocumentGenerator` accepts only rendered input and returns a `GeneratedDocument`
 with final, post-processed `contents`, `target`, `fingerprint`, and `generationId`.
+Opted-in results also carry the rendered request's `snapshotId`.
 It does not retain the rendered HTML. `DocumentPublisher` accepts only that
 generated result and coordinates storage, snapshot-cache updates, and publication
 events; it has no generator dependency. `DocumentJobFactory` creates jobs from
@@ -340,6 +341,63 @@ dispatch are not atomic: simultaneous callers or already-running jobs can still
 produce additional versions. External storage writes do not participate in this
 coordination. A worker crash after storage can also cause a retry.
 
+### Latest rendered snapshot wins (opt-in)
+
+Prevent an older queued snapshot from overwriting a newer synchronous HTTP
+publication by enabling this policy on the document:
+
+```php
+public static ?bool $latestSnapshotWins = true;
+```
+
+Alternatively, set `'latest_snapshot_wins' => true` in the published
+`config/laravel-documents.php` to enable it package-wide. The document property
+defaults to `null` (inherit); `false` explicitly opts out. Override
+`latestSnapshotWins(): ?bool` for instance-specific selection. Explicitly
+constructed snapshots accept `new RenderedDocument($html, $target,
+latestSnapshotWins: true)` and otherwise inherit the package default.
+
+After HTML rendering succeeds, snapshot construction registers a new opaque
+`snapshotId` in the shared snapshot cache under the target's publication lock.
+This registration defines rendering completion and ordering; it does not use
+worker timestamps or PDF generation completion. Each new snapshot supersedes
+earlier opted-in snapshots for that storage-context identity, even when the HTML
+is identical. Snapshot IDs do not affect content fingerprints.
+
+The immutable ID survives serialization and is copied into `GeneratedDocument`.
+Generation, job creation from existing snapshots, publication, and retries do
+not register the snapshot again. Under the same target lock, publication checks
+the ID before writing or changing the stored fingerprint. Superseded results
+write nothing, emit `DocumentSuperseded` instead of `DocumentStored`, and return
+`null`; generation may still have run. The event includes `target`,
+`generationId`, `snapshotId`, and `latestSnapshotId`. Its listeners run after
+the lock is released. A built-in job's `generated()` is true after the completed
+attempt, including a superseded one; it is not proof of storage.
+
+The newest rendered request wins even if its job is never dispatched, is
+cancelled, or fails generation. Older results do not become eligible again.
+Repeated publication of the latest result is still allowed. The policy applies
+to disk, versioned, and custom storage through the common publication service;
+superseded results do not create historical versions.
+
+**Queue uniqueness is unchanged:** `GenerateUniqueDocument` still discards
+duplicate dispatches. Rendering a newer snapshot can supersede an older job
+even if Laravel subsequently discards the newer job. If every newer request
+must be queued, select `GenerateVersionedDocument` (also usable with disk
+storage), a non-unique custom job, or its progress-enabled equivalent.
+This policy prevents stale writes; it does not schedule replacement jobs.
+
+Rendering now needs the shared persistent cache when opted in, even for
+generation without publication. All participating HTTP processes and workers
+must use the same cache store and prefix, and opt in consistently. Untracked
+snapshots, including explicitly opted-out and legacy payloads, retain the old
+publication-order behavior. Registration failures propagate. Missing or evicted
+latest-request markers fail publication explicitly rather than allowing stale
+contents through; render a fresh snapshot to recover. Do not flush or change
+the coordinating cache while workloads are outstanding. Atomic-lock lease
+duration must exceed storage writes; external writes and expired lock leases
+are outside the guarantee.
+
 ### Document events
 
 Generation and publication emit the existing lifecycle events:
@@ -349,6 +407,8 @@ Generation and publication emit the existing lifecycle events:
   generation, not rendering the Blade view.
 - `DocumentPublisher` emits `DocumentStored` after storage succeeds, with the
   version identifier or `null`. It never emits a generation-start event.
+- With latest-snapshot-wins enabled, superseded publication emits
+  `DocumentSuperseded` without storing or emitting `DocumentStored`.
 - Either stage emits `DocumentRenderFailed` if it throws, with the exception
   class and message; the original exception is rethrown.
 
