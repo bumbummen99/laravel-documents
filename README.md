@@ -147,6 +147,32 @@ generated result and coordinates storage, snapshot-cache updates, and publicatio
 events; it has no generator dependency. `DocumentJobFactory` creates jobs from
 rendered input. No service is serialized into either result or a job.
 
+Use `publishWithResult()` when the caller must distinguish a completed write
+from a superseded attempt:
+
+```php
+use SkyRaptor\LaravelDocuments\DocumentPublicationStatus;
+
+$result = Documents::publishWithResult($rendered);
+
+if ($result->status === DocumentPublicationStatus::Superseded) {
+    abort(409, 'The requested PDF was superseded. Please try again.');
+}
+
+$version = $result->version; // null for unversioned storage
+```
+
+`Documents::publishWithResult()` accepts the same inputs and `generationId` as
+`publish()`. `DocumentPublisher::publishWithResult()` accepts a generated result.
+The result reports `Published` with the storage version (which may be null), or
+`Superseded` with a null version. Generation, storage, and cache failures still
+throw. The existing `publish()` return value is unchanged: null can mean either
+an unversioned write or a superseded attempt.
+
+An outcome describes that publication attempt, not a guarantee that its target
+remains unchanged afterward. Applications are responsible for deciding how to
+respond and for any availability or freshness checks needed before serving it.
+
 Each workflow invocation renders, generates, and writes at most once. Explicitly
 publishing the same result again can write again, and queue retries can repeat
 generation and publication; this is not an exactly-once queue guarantee.
@@ -371,7 +397,8 @@ Generation, job creation from existing snapshots, publication, and retries do
 not register the snapshot again. Under the same target lock, publication checks
 the ID before writing or changing the stored fingerprint. Superseded results
 write nothing, emit `DocumentSuperseded` instead of `DocumentStored`, and return
-`null`; generation may still have run. The event includes `target`,
+`null` from `publish()` or a `Superseded` result from `publishWithResult()`;
+generation may still have run. The event includes `target`,
 `generationId`, `snapshotId`, and `latestSnapshotId`. Its listeners run after
 the lock is released. A built-in job's `generated()` is true after the completed
 attempt, including a superseded one; it is not proof of storage.

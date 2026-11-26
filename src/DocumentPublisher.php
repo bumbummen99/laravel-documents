@@ -29,6 +29,14 @@ class DocumentPublisher
      */
     public function publish(GeneratedDocument $generated): ?string
     {
+        return $this->publishWithResult($generated)->version;
+    }
+
+    /**
+     * Store the generated contents and report whether publication was superseded.
+     */
+    public function publishWithResult(GeneratedDocument $generated): DocumentPublicationResult
+    {
         $target = $generated->target;
 
         try {
@@ -57,11 +65,11 @@ class DocumentPublisher
         }
 
         if ($version === false) {
-            return null;
+            return DocumentPublicationResult::superseded();
         }
 
         $this->dispatchDocumentEvent(new DocumentStored($target, $generated->generationId, $version));
 
-        return $version;
+        return DocumentPublicationResult::published($version);
     }
 }
