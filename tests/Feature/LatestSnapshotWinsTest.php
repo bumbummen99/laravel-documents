@@ -2,8 +2,10 @@
 
 declare(strict_types=1);
 
+use Illuminate\Bus\UniqueLock;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Route;
@@ -130,19 +132,80 @@ it('allows publication retries of the latest snapshot without registering it aga
     Event::assertNotDispatched(DocumentSuperseded::class);
 });
 
-it('keeps request identity out of content fingerprints and does not revive an old snapshot on reuse', function () {
+it('allows an already queued snapshot to publish after an equivalent snapshot is rendered', function () {
     $older = latestSnapshot('same');
-    $newer = latestSnapshot('same');
     $job = Documents::makeJob($older);
+    $newer = latestSnapshot('same');
     Event::fake([DocumentStored::class, DocumentSuperseded::class]);
     $job->handle();
 
-    expect($older->snapshotId)->not->toBe($newer->snapshotId)
+    expect($older->snapshotId)->toBe($newer->snapshotId)
         ->and($older->fingerprint())->toBe($newer->fingerprint())
-        ->and(Storage::disk('documents')->exists('latest.pdf'))->toBeFalse();
-    Documents::publish($newer);
+        ->and(Storage::disk('documents')->get('latest.pdf'))->toBe('same');
     expect(Documents::makeJobIfChanged(latestSnapshot('same')))->toBeNull();
     Event::assertDispatchedOnce(DocumentStored::class);
+    Event::assertNotDispatched(DocumentSuperseded::class);
+});
+
+it('does not revive a superseded snapshot when its content becomes current again', function () {
+    $original = latestSnapshot('A');
+    $intermediate = latestSnapshot('B');
+    $current = latestSnapshot('A');
+    Event::fake([DocumentStored::class, DocumentSuperseded::class]);
+
+    Documents::publish($original);
+    Documents::publish($intermediate);
+    expect(Storage::disk('documents')->exists('latest.pdf'))->toBeFalse();
+
+    Documents::publish($current);
+
+    expect($original->snapshotId)->not->toBe($current->snapshotId)
+        ->and(Storage::disk('documents')->get('latest.pdf'))->toBe('A');
+    Event::assertDispatchedTimes(DocumentSuperseded::class, 2);
+    Event::assertDispatchedOnce(DocumentStored::class);
+});
+
+it('keeps the accepted unique job eligible when an equivalent duplicate is blocked', function () {
+    $older = latestSnapshot('same');
+    $job = new GenerateUniqueDocument($older);
+    $locks = new UniqueLock(Cache::store());
+    expect($locks->acquire($job))->toBeTrue();
+
+    try {
+        $duplicate = new GenerateUniqueDocument(latestSnapshot('same'));
+        expect($locks->acquire($duplicate))->toBeFalse();
+
+        $job->handle();
+
+        expect(Storage::disk('documents')->get('latest.pdf'))->toBe('same');
+    } finally {
+        $locks->release($job);
+    }
+});
+
+it('supersedes legacy snapshot markers when registering a fingerprinted snapshot', function () {
+    $snapshot = latestSnapshot('same');
+    $cache = app(DocumentSnapshotCache::class);
+    $legacy = $cache->register($snapshot->target);
+    $new = latestSnapshot('same');
+
+    expect($new->snapshotId)->not->toBe($legacy)
+        ->and($new->snapshotId)->not->toBe($snapshot->snapshotId);
+    Documents::publish($snapshot);
+    expect(Storage::disk('documents')->exists('latest.pdf'))->toBeFalse();
+    Documents::publish($new);
+    expect(Storage::disk('documents')->get('latest.pdf'))->toBe('same');
+});
+
+it('treats a different PDF driver as a different latest snapshot', function () {
+    $original = latestSnapshot('same');
+    $newer = new RenderedDocument('same', $original->target, 'other-driver', latestSnapshotWins: true);
+    Event::fake([DocumentStored::class, DocumentSuperseded::class]);
+
+    Documents::publish($original);
+
+    expect($original->snapshotId)->not->toBe($newer->snapshotId)
+        ->and(Storage::disk('documents')->exists('latest.pdf'))->toBeFalse();
     Event::assertDispatchedOnce(DocumentSuperseded::class);
 });
 

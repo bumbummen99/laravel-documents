@@ -360,9 +360,11 @@ latestSnapshotWins: true)` and otherwise inherit the package default.
 After HTML rendering succeeds, snapshot construction registers a new opaque
 `snapshotId` in the shared snapshot cache under the target's publication lock.
 This registration defines rendering completion and ordering; it does not use
-worker timestamps or PDF generation completion. Each new snapshot supersedes
-earlier opted-in snapshots for that storage-context identity, even when the HTML
-is identical. Snapshot IDs do not affect content fingerprints.
+worker timestamps or PDF generation completion. Snapshots with the same current
+fingerprint share an ID and remain eligible to publish. A different fingerprint
+supersedes earlier opted-in snapshots for that storage-context identity. If the
+content changes from A to B and back to A, the new A gets a new ID and the
+original A remains superseded. Snapshot IDs do not affect content fingerprints.
 
 The immutable ID survives serialization and is copied into `GeneratedDocument`.
 Generation, job creation from existing snapshots, publication, and retries do
@@ -374,18 +376,22 @@ write nothing, emit `DocumentSuperseded` instead of `DocumentStored`, and return
 the lock is released. A built-in job's `generated()` is true after the completed
 attempt, including a superseded one; it is not proof of storage.
 
-The newest rendered request wins even if its job is never dispatched, is
-cancelled, or fails generation. Older results do not become eligible again.
+The newest distinct rendered fingerprint wins even if its job is never dispatched,
+is cancelled, or fails generation. Superseded results do not become eligible again.
 Repeated publication of the latest result is still allowed. The policy applies
 to disk, versioned, and custom storage through the common publication service;
 superseded results do not create historical versions.
 
 **Queue uniqueness is unchanged:** `GenerateUniqueDocument` still discards
-duplicate dispatches. Rendering a newer snapshot can supersede an older job
-even if Laravel subsequently discards the newer job. If every newer request
+duplicate dispatches. Rendering a different snapshot can supersede an older job
+even if Laravel subsequently discards the newer job; an equivalent snapshot
+does not. If every newer request
 must be queued, select `GenerateVersionedDocument` (also usable with disk
 storage), a non-unique custom job, or its progress-enabled equivalent.
 This policy prevents stale writes; it does not schedule replacement jobs.
+Equivalent snapshots may publish in either order. The fingerprint covers rendered
+HTML, target, and driver identifier, not mutable external assets or changes to a
+driver's implementation.
 
 Rendering now needs the shared persistent cache when opted in, even for
 generation without publication. All participating HTTP processes and workers
@@ -397,6 +403,11 @@ contents through; render a fresh snapshot to recover. Do not flush or change
 the coordinating cache while workloads are outstanding. Atomic-lock lease
 duration must exceed storage writes; external writes and expired lock leases
 are outside the guarantee.
+
+During a rolling upgrade, older processes still register a new ID for every
+render, including equivalent renders. Existing UUID-only markers cannot be
+matched to a fingerprint, so the first new registration supersedes them. Restart
+all rendering processes to obtain the equivalent-snapshot behavior consistently.
 
 ### Document events
 

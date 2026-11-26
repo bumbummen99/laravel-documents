@@ -44,7 +44,7 @@ final readonly class RenderedDocument
         }
 
         $this->snapshotId = $latestSnapshotWins
-            ? app(DocumentSnapshotCache::class)->register($this->target)
+            ? app(DocumentSnapshotCache::class)->register($this->target, $this->fingerprint())
             : null;
     }
 

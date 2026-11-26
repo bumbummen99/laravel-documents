@@ -107,3 +107,26 @@ it('rejects stale serialized snapshots across separate rendering and publication
         File::deleteDirectory($directory);
     }
 });
+
+it('allows an equivalent snapshot captured in another process to preserve the queued snapshot', function () {
+    Storage::fake('documents');
+    $directory = Storage::disk('documents')->path('equivalent-snapshot-cache');
+    File::makeDirectory($directory, 0755, true);
+    $script = __DIR__.'/../Smoke/SnapshotCacheWorker.php';
+    $autoload = snapshotWorkerAutoload();
+
+    try {
+        foreach (['queued', 'duplicate'] as $name) {
+            (new Process([PHP_BINARY, $script, $autoload, $directory, 'capture', 'same', $directory.'/'.$name.'.snapshot', '-']))
+                ->mustRun();
+        }
+
+        $worker = new Process([PHP_BINARY, $script, $autoload, $directory, 'publish-captured', '-', $directory.'/queued.snapshot', '-']);
+        $worker->mustRun();
+
+        expect($worker->getOutput())->toBe('published')
+            ->and(File::get($directory.'/published.pdf'))->toBe('same');
+    } finally {
+        File::deleteDirectory($directory);
+    }
+});
