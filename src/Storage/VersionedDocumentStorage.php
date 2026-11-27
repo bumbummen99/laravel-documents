@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace SkyRaptor\LaravelDocuments\Storage;
 
+use Closure;
 use Illuminate\Filesystem\FilesystemAdapter;
 use LogicException;
 use RuntimeException;
 use SkyRaptor\LaravelDocuments\Storage\Contexts\DocumentStorageContext;
 use SkyRaptor\LaravelDocuments\Storage\Contexts\FilesystemDocumentStorageContext;
+use SkyRaptor\LaravelVersionedStorage\StagedVersion;
 use SkyRaptor\LaravelVersionedStorage\VersionedStorage;
 use SkyRaptor\LaravelVersionedStorage\VersionedStorageHandler;
 
@@ -40,6 +42,18 @@ class VersionedDocumentStorage implements Contracts\DocumentStorage
                 throw new RuntimeException('Failed to write the generated PDF.');
             }
         }, $this->cleanup);
+    }
+
+    /** @param Closure(string): void $record */
+    public function stage(DocumentStorageContext $context, string $contents, Closure $record): StagedVersion
+    {
+        return $this->handler($context)->stage(function (FilesystemAdapter $files, string $version) use ($contents, $record): void {
+            $record($version);
+
+            if (! $files->put(static::DOCUMENT_FILE, $contents)) {
+                throw new RuntimeException('Failed to write the generated PDF.');
+            }
+        });
     }
 
     public function get(DocumentStorageContext $context, ?string $version = null): string

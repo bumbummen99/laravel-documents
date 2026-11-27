@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace SkyRaptor\LaravelDocuments;
 
+use Illuminate\Support\Str;
 use InvalidArgumentException;
 
 /**
@@ -32,6 +33,7 @@ final readonly class RenderedDocument
          */
         public string $driver = 'default',
         ?bool $latestSnapshotWins = null,
+        ?string $registeredSnapshotId = null,
     ) {
         if ($driver === '') {
             throw new InvalidArgumentException('The document PDF driver configuration cannot be empty.');
@@ -43,9 +45,18 @@ final readonly class RenderedDocument
             throw new InvalidArgumentException('The latest snapshot wins option must be a boolean.');
         }
 
-        $this->snapshotId = $latestSnapshotWins
+        if (config('laravel-documents.coalescing.enabled') && ! $latestSnapshotWins) {
+            throw new InvalidArgumentException('Coalesced document generation requires latest snapshot ordering for every document.');
+        }
+
+        if ($registeredSnapshotId !== null && (! $latestSnapshotWins || ! Str::isUuid($registeredSnapshotId)
+            || config('laravel-documents.coalescing.enabled') !== true)) {
+            throw new InvalidArgumentException('Restoring a registered snapshot requires coalescing and a valid UUID.');
+        }
+
+        $this->snapshotId = $registeredSnapshotId ?? ($latestSnapshotWins
             ? app(DocumentSnapshotCache::class)->register($this->target, $this->fingerprint())
-            : null;
+            : null);
     }
 
     public function fingerprint(): string

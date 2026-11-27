@@ -12,6 +12,7 @@ use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Support\ServiceProvider;
 use LogicException;
+use SkyRaptor\LaravelDocuments\Console\RecoverDocuments;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateVersionedDocument;
 use SkyRaptor\LaravelDocuments\Jobs\UniqueDocumentCacheRepository;
 use SkyRaptor\LaravelDocuments\Pdf\DocumentPdfDriverManager;
@@ -78,5 +79,10 @@ class LaravelDocumentsServiceProvider extends ServiceProvider
         $this->publishes([
             __DIR__.'/../config/laravel-documents.php' => config_path('laravel-documents.php'),
         ], ['laravel-documents', 'laravel-documents-config']);
+
+        $this->publishes([
+            __DIR__.'/../database/migrations/2026_11_27_105147_create_document_coalescing_tables.php' => database_path('migrations/2026_11_27_105147_create_document_coalescing_tables.php'),
+        ], 'laravel-documents-migrations');
+        $this->commands([RecoverDocuments::class]);
     }
 }

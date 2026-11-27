@@ -65,7 +65,7 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   Lock-release failures are reported without failing completed writes or masking
   original storage exceptions. Comparison and dispatch are not atomic.
 - Publish `laravel-documents-config` to customize cache settings. The base
-  package has no migrations.
+  package has no migrations unless optional coalescing is enabled.
 - To prevent old queued snapshots from overwriting newer HTTP publications,
   set `public static ?bool $latestSnapshotWins = true` on the document or
   `laravel-documents.latest_snapshot_wins` globally. Null inherits; false opts
@@ -79,6 +79,24 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   Missing cache markers fail explicitly; render a fresh snapshot to recover.
   Opt in consistently across HTTP and workers; untracked legacy/opted-out
   snapshots retain publication-order behavior.
+- For recoverable coalesced queued generation, install Versioned Storage
+  0.2.0-beta.1 or a compatible release and run its migrations, publish
+  `laravel-documents-migrations`, and migrate on the same connection. Enable
+  `laravel-documents.coalescing.enabled` and `latest_snapshot_wins`, and use
+  versioned storage for all snapshots. Call `Documents::dispatchCoalesced($document,
+  connection: 'redis', queue: 'pdf')`; unlike `makeJob()`, this dispatches.
+  Schedule `documents:recover` every minute and run queue workers. Avoid calling
+  coalescing operations inside database transactions.
+- Coalescing persists the latest HTML in plaintext until processing finishes.
+  Protect the database and backups. Target ordering records must remain while
+  old snapshots or jobs may exist. Set the recovery lease and stage-retention
+  duration above expected work durations; recovery and queue retries are at
+  least once, and slow stages can be reclaimed and need retrying. Monitor errors.
+  Progress tracking and batches are not provided for coalesced jobs.
+- Both synchronous and coalesced publication use staged versioned writes and a
+  shared database ordering check. Do not mix older workers, cache-only writers,
+  direct storage writes, or different connections: these bypass its guarantee.
+  Run the scheduler and follow Versioned Storage's upload/cleanup limitations.
 
 ### 3. Configure integrations
 

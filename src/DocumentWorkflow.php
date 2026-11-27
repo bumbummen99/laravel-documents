@@ -89,4 +89,13 @@ class DocumentWorkflow
             $job ?? ($document instanceof Document ? $document->job() : null),
         );
     }
+
+    public function dispatchCoalesced(Document|RenderedDocument $document, ?string $connection = null, ?string $queue = null): bool
+    {
+        return app(DocumentCoalescer::class)->dispatch(
+            $document instanceof Document ? $document->render() : $document,
+            $connection,
+            $queue,
+        );
+    }
 }

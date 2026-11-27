@@ -41,18 +41,21 @@ class DocumentPublisher
 
         try {
             $storage = $this->storage->resolve($target->storage);
-            $version = $this->snapshots->publish(
-                $generated,
-                fn () => $storage->write($target->context, $generated->contents),
-                function (string $latestSnapshotId) use ($generated, $target): void {
-                    $this->dispatchDocumentEvent(new DocumentSuperseded(
-                        $target,
-                        $generated->generationId,
-                        $generated->snapshotId,
-                        $latestSnapshotId,
-                    ));
-                },
-            );
+            $superseded = function (string $latestSnapshotId) use ($generated, $target): void {
+                $this->dispatchDocumentEvent(new DocumentSuperseded(
+                    $target,
+                    $generated->generationId,
+                    $generated->snapshotId,
+                    $latestSnapshotId,
+                ));
+            };
+            $version = config('laravel-documents.coalescing.enabled')
+                ? app(DocumentCoalescer::class)->publish($generated, $storage, $superseded)
+                : $this->snapshots->publish(
+                    $generated,
+                    fn () => $storage->write($target->context, $generated->contents),
+                    $superseded,
+                );
         } catch (Throwable $exception) {
             $this->dispatchDocumentEvent(new DocumentRenderFailed(
                 target: $target,

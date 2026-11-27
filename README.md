@@ -33,7 +33,7 @@ php artisan vendor:publish --tag="laravel-documents-config"
 ```
 
 The base package does not require database migrations. Optional versioned
-storage has its own migration setup described below.
+storage and coalesced generation have their own migration setup described below.
 
 ## Usage
 
@@ -369,6 +369,9 @@ coordination. A worker crash after storage can also cause a retry.
 
 ### Latest rendered snapshot wins (opt-in)
 
+This section describes the default cache-backed policy. For database-backed
+ordering with coalesced queued work, see **Coalesced generation** below.
+
 Prevent an older queued snapshot from overwriting a newer synchronous HTTP
 publication by enabling this policy on the document:
 
@@ -435,6 +438,81 @@ During a rolling upgrade, older processes still register a new ID for every
 render, including equivalent renders. Existing UUID-only markers cannot be
 matched to a fingerprint, so the first new registration supersedes them. Restart
 all rendering processes to obtain the equivalent-snapshot behavior consistently.
+
+### Coalesced generation (opt-in)
+
+Coalescing keeps the newest pending rendered snapshot per target. One queue
+wakeup normally processes it; a request arriving during generation replaces the
+pending snapshot and the worker continues with the newest one. Intermediate
+snapshots may be skipped. This mode currently requires the built-in `versioned`
+storage and `skyraptor/laravel-versioned-storage` 0.2.0-beta.1 or a compatible
+version. Install and migrate that package first, then publish and run the
+Documents migration:
+
+```bash
+php artisan vendor:publish --tag=laravel-documents-migrations
+php artisan migrate
+```
+
+Set `latest_snapshot_wins` and `coalescing.enabled` to `true` in
+`config/laravel-documents.php`. Set `coalescing.connection` and
+`laravel-versioned-storage.connection` to the same Laravel database connection
+(both default to the default connection), and run both packages' migrations on
+that connection. Every document rendered while coalescing is enabled must use
+versioned storage and latest-snapshot ordering. Calls starting inside a database
+transaction are rejected: enqueue after the caller's transaction commits.
+
+```php
+use SkyRaptor\LaravelDocuments\Facades\Documents;
+use Illuminate\Support\Facades\Schedule;
+
+// InvoiceDocument has public static string $storage = 'versioned'.
+Documents::dispatchCoalesced($document, connection: 'redis', queue: 'pdf');
+
+// Schedule the recovery command in the application's console routes:
+Schedule::command('documents:recover')->everyMinute();
+```
+
+`dispatchCoalesced()` returns `false` if that rendered snapshot was already
+superseded before it could be recorded, or `true` when it was accepted.
+Dispatch errors throw even though the recorded request remains recoverable.
+
+Run Laravel's scheduler and queue workers continuously. The durable target row
+is written before dispatch. If dispatch fails, the exception is raised and
+recovery retries after `coalescing.lease_seconds`. Terminal worker failures,
+crashes, and lost wakeups are also recovered; monitor failed jobs and command
+errors. Choose a lease longer than normal queue delay and processing time to
+avoid unnecessary duplicate attempts, and set the queue worker timeout below
+its queue's retry/visibility timeout. Recovery can dispatch another worker after
+a lease expires, so generation and wakeups are **at least once**, not exactly
+once. Queue connection and name for recovery follow the latest pending request.
+Coalesced jobs do not implement the optional progress integration or batches.
+
+Synchronous `publishWithResult()` uses the same database ordering and staged
+publication, and HTML preview remains separate. A newer synchronous publication
+supersedes older pending work; if the same snapshot is already current and the
+PDF exists, the worker skips generation. Conversely, a newer queued snapshot
+supersedes an older synchronous attempt. Registration order is defined after
+rendering, not by source-record revision or the time a request started.
+
+Versioned writes are staged outside a transaction. The target's latest snapshot
+check, current-version switch, and fingerprint update commit together on the
+same database connection. An ID is journaled before a stage can become ready;
+recovery discards abandoned stages after `coalescing.stage_retention_seconds`.
+Set this retention longer than the longest expected staging operation. Recovery
+may invalidate a slow stage, causing its publisher to fail and require a retry.
+Versioned Storage's upload deadlines, cleanup grace, filesystem and database
+failure limitations also apply. External writers and older application versions
+that bypass this protocol are not fenced: drain old workers and deploy the mode
+consistently before enabling it. Disabling or changing the database while work
+is outstanding also breaks coordination.
+
+Pending rendered HTML is stored as plaintext JSON in the database until work
+completes, and may persist in database backups, replicas, logs, or failed-job
+records. Restrict database and backup access and apply appropriate retention
+policies. Target ordering rows and fingerprints remain after completion to keep
+old snapshots fenced; do not delete them while old work or snapshots may exist.
+Only trusted processes should be allowed to modify these tables.
 
 ### Document events
 

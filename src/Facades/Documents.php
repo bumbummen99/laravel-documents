@@ -18,6 +18,7 @@ use SkyRaptor\LaravelDocuments\RenderedDocument;
  * @method static DocumentPublicationResult publishWithResult(Document|RenderedDocument|GeneratedDocument $document, ?string $generationId = null)
  * @method static GenerateDocument makeJob(Document|RenderedDocument $document, ?string $connection = null, ?string $queue = null, class-string|null $job = null)
  * @method static GenerateDocument|null makeJobIfChanged(Document|RenderedDocument $document, ?string $connection = null, ?string $queue = null, class-string|null $job = null)
+ * @method static bool dispatchCoalesced(Document|RenderedDocument $document, ?string $connection = null, ?string $queue = null)
  *
  * @see DocumentWorkflow
  */

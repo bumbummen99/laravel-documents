@@ -6,6 +6,13 @@ return [
 
     'latest_snapshot_wins' => false,
 
+    'coalescing' => [
+        'enabled' => false,
+        'connection' => null,
+        'lease_seconds' => 300,
+        'stage_retention_seconds' => 3600,
+    ],
+
     'snapshot_cache' => [
         'store' => null,
         'lock_seconds' => 300,
