@@ -119,6 +119,14 @@ it('publishes only the package configuration', function () {
         ->and(array_values($paths))->toBe([config_path('laravel-documents.php')]);
 });
 
+it('publishes the coalescing tables migration', function () {
+    $paths = ServiceProvider::pathsToPublish(LaravelDocumentsServiceProvider::class, 'laravel-documents-migrations');
+
+    expect($paths)->toHaveCount(1)
+        ->and(array_map('realpath', array_keys($paths)))->toBe([realpath(__DIR__.'/../../database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')])
+        ->and(array_values($paths))->toBe([database_path('migrations/2026_11_27_105147_create_document_coalescing_tables.php')]);
+});
+
 it('does not register a placeholder command', function () {
     expect(Artisan::all())->not->toHaveKey('laravel-documents:placeholder');
 });

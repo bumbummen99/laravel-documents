@@ -20,6 +20,8 @@ return new class extends Migration
             $table->timestamp('lease_until')->nullable()->index();
             $table->string('queue_connection')->nullable();
             $table->string('queue_name')->nullable();
+            $table->boolean('tombstoned')->default(false);
+            $table->string('published_version')->nullable();
         });
 
         Schema::create('document_coalescing_stages', function (Blueprint $table): void {

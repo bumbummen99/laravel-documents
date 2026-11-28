@@ -96,7 +96,6 @@ function withRealVersionedStorage(Closure $test): void
 function createCoalescingTables(): void
 {
     (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
-    (require dirname(__DIR__, 2).'/database/migrations/2026_11_28_100710_add_tombstone_to_document_coalescing_targets.php')->up();
 }
 
 beforeEach(function () {
