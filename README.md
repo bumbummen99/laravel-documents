@@ -173,9 +173,36 @@ An outcome describes that publication attempt, not a guarantee that its target
 remains unchanged afterward. Applications are responsible for deciding how to
 respond and for any availability or freshness checks needed before serving it.
 
-Each workflow invocation renders, generates, and writes at most once. Explicitly
-publishing the same result again can write again, and queue retries can repeat
-generation and publication; this is not an exactly-once queue guarantee.
+Each workflow invocation renders, generates, and writes at most once. Outside
+coalescing, explicitly publishing the same result again can write again, and
+queue retries can repeat generation and publication. Coalescing reuses an
+existing matching PDF when possible, but is not an exactly-once queue guarantee.
+
+### Document metadata
+
+Override `metadata()` to freeze PDF metadata alongside the rendered HTML:
+
+```php
+use SkyRaptor\LaravelDocuments\DocumentMetadata;
+
+public function metadata(): ?DocumentMetadata
+{
+    return new DocumentMetadata(
+        title: 'Invoice '.$this->invoice->number,
+        author: 'Accounts',
+        creationDate: $this->invoice->created_at,
+    );
+}
+```
+
+The immutable metadata supports `title`, `author`, `subject`, `keywords`,
+`creator`, and `creationDate` (a PDF date string or `DateTimeInterface`). It
+travels with the snapshot, participates in its fingerprint, and replaces all
+metadata set by the builder callback. Return `null` to leave existing builder
+metadata unchanged; metadata configured only in that callback is resolved at
+generation time and is not part of the snapshot fingerprint. Move
+document-specific metadata into `metadata()` for change detection. Metadata
+can contain sensitive information and must be protected like rendered HTML.
 
 ### PDF driver configurations
 
@@ -420,8 +447,8 @@ must be queued, select `GenerateVersionedDocument` (also usable with disk
 storage), a non-unique custom job, or its progress-enabled equivalent.
 This policy prevents stale writes; it does not schedule replacement jobs.
 Equivalent snapshots may publish in either order. The fingerprint covers rendered
-HTML, target, and driver identifier, not mutable external assets or changes to a
-driver's implementation.
+HTML, document metadata, target, and driver identifier, not mutable external
+assets, builder-only metadata, or changes to a driver's implementation.
 
 Rendering now needs the shared persistent cache when opted in, even for
 generation without publication. All participating HTTP processes and workers
@@ -501,7 +528,9 @@ Run Laravel's scheduler and queue workers continuously. The durable target row
 is written before dispatch. If dispatch fails, the exception is raised and
 recovery retries after `coalescing.lease_seconds`. Terminal worker failures,
 crashes, and lost wakeups are also recovered; monitor failed jobs and command
-errors. Choose a lease longer than normal queue delay and processing time to
+errors. Recovery attempts other targets and abandoned stages when one fails,
+reports additional failures, and rethrows the first failure so the command
+does not report success. Choose a lease longer than normal queue delay and processing time to
 avoid unnecessary duplicate attempts, and set the queue worker timeout below
 its queue's retry/visibility timeout. Recovery can dispatch another worker after
 a lease expires, so generation and wakeups are **at least once**, not exactly
@@ -513,7 +542,14 @@ Coalesced jobs do not implement the optional progress integration or batches.
 Synchronous `publishWithResult()` uses the same database ordering and staged
 publication, but rendering its snapshot also records recoverable queue work.
 The scheduler can run a worker concurrently with synchronous generation, so
-duplicate generation and publication of the same snapshot are possible.
+duplicate generation is possible. The first matching publication wins: later
+attempts discard their staged PDF and return the existing version, even if the
+generated PDF bytes differ. They do not emit `DocumentStored` again. If the
+existing PDF is missing, a new attempt publishes a replacement. File existence
+is checked while holding the target's database lock, so a slow storage check
+can delay other operations for that target.
+Successful synchronous publication or reuse clears matching pending work
+atomically; it does not clear a newer snapshot.
 For HTML-only previews, use `$document->html()` instead of `render()`; authorize
 any application route serving that HTML. A newer synchronous publication
 supersedes older pending work; if the same snapshot is already current and the
@@ -528,15 +564,15 @@ version is reused only when its fingerprint matches and its file exists;
 otherwise it generates and publishes normally. If a newer snapshot is
 registered during the check, it returns `Superseded`. Reuse requires
 coalescing and versioned storage, and must run outside a database transaction.
-Unlike `publishWithResult()`, reusing a version does not emit a new
-`DocumentStored` event. Versions published before the reuse migration are
+Reuse does not emit a new `DocumentStored` event. Versions published before the reuse migration are
 regenerated once because their version identifier was not recorded.
 
 `Documents::targetStatus($document->target())` exposes shared target state:
 `NotScheduled`, `Pending`, `Published`, or `Tombstoned` from
 `DocumentTargetStatus`. `Pending` includes queued, running, failed-attempt,
 and recovery-waiting work, including snapshots rendered but not explicitly
-dispatched; it is not a percentage or a terminal failure.
+dispatched; it is not a percentage or a terminal failure. A successful
+synchronous publication or reuse reports `Published` without a worker.
 `Published` means the latest fingerprint was published, not that the physical
 file has been checked at query time. This state is shared by all requests for
 that target, not attached to any individual job or requester.
@@ -553,11 +589,24 @@ that bypass this protocol are not fenced: drain old workers and deploy the mode
 consistently before enabling it. Disabling or changing the database while work
 is outstanding also breaks coordination.
 
-Pending rendered HTML is stored as plaintext JSON in the database until work
-completes, and may persist in database backups, replicas, logs, or failed-job
-records. Restrict database and backup access and apply appropriate retention
-policies. Target ordering rows and fingerprints remain after completion to keep
-old snapshots fenced; do not delete them while old work or snapshots may exist.
+Pending rendered snapshots are encrypted with Laravel's application encryption
+key until work completes. All renderers, workers, and recovery processes must
+share the same key. Configure Laravel's previous keys when rotating it and
+retain them until all pending snapshots encrypted with those keys have finished;
+losing the key causes explicit decryption failures and prevents recovery.
+Existing plaintext pending rows remain readable for upgrades, and old backups,
+replicas, logs, or failed-job records may retain plaintext. Encryption does not
+hide target metadata, fingerprints, or stored PDFs; restrict access and apply
+appropriate retention policies.
+
+Older package versions cannot read newly encrypted rows. Before upgrading,
+pause rendering, workers, and recovery, deploy the new version everywhere, and
+restart processes before resuming. Do not roll back while encrypted pending
+rows remain. Workers must also understand document metadata before receiving
+snapshots that contain it; drain old workers before enabling document-level
+metadata. Target ordering rows and fingerprints remain after completion to
+keep old snapshots fenced; do not delete them while old work or snapshots may
+exist.
 Only trusted processes should be allowed to modify these tables.
 
 Before deleting a document's underlying record, the application can fence

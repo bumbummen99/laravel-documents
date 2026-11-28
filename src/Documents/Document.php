@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace SkyRaptor\LaravelDocuments\Documents;
 
 use Illuminate\Support\Facades\Storage;
+use SkyRaptor\LaravelDocuments\DocumentMetadata;
 use SkyRaptor\LaravelDocuments\DocumentTarget;
 use SkyRaptor\LaravelDocuments\RenderedDocument;
 use SkyRaptor\LaravelDocuments\Storage\Contexts\DocumentStorageContext;
@@ -66,7 +67,13 @@ abstract class Document
             target: $this->target(),
             driver: $this->pdfDriver(),
             latestSnapshotWins: $this->latestSnapshotWins(),
+            metadata: $this->metadata(),
         );
+    }
+
+    public function metadata(): ?DocumentMetadata
+    {
+        return null;
     }
 
     /**

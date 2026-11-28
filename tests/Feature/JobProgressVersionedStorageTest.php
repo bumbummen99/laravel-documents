@@ -3,12 +3,15 @@
 declare(strict_types=1);
 
 use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Encryption\MissingAppKeyException;
 use Illuminate\Filesystem\FilesystemAdapter;
 use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Config;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
@@ -17,6 +20,7 @@ use Mateffy\JobProgress\LaravelJobProgressServiceProvider;
 use Mateffy\JobProgress\Traits\Progress;
 use SkyRaptor\LaravelDocuments\DocumentCoalescer;
 use SkyRaptor\LaravelDocuments\DocumentGenerator;
+use SkyRaptor\LaravelDocuments\DocumentMetadata;
 use SkyRaptor\LaravelDocuments\DocumentPublicationStatus;
 use SkyRaptor\LaravelDocuments\Documents\Document;
 use SkyRaptor\LaravelDocuments\DocumentSnapshotCache;
@@ -103,6 +107,9 @@ beforeEach(function () {
     $this->app->register(LaravelJobProgressServiceProvider::class);
     $this->app->register(VersionedStorageServiceProvider::class);
     $this->app->make(Kernel::class)->rerouteSymfonyCommandEvents();
+    Config::set('app.key', 'base64:'.base64_encode(str_repeat('t', 32)));
+    $this->app->forgetInstance('encrypter');
+    Crypt::clearResolvedInstance('encrypter');
     Config::set('job-progress.cache.store', 'array');
     Storage::fake('documents');
 });
@@ -232,6 +239,330 @@ it('reports shared target state across joined requests, recovery, publication, a
         expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Tombstoned);
         Documents::restoreTarget($target);
         expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::NotScheduled);
+    });
+});
+
+it('marks a synchronously published or reused snapshot complete without waiting for a worker', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        $target = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/sync-status.pdf', 'documents'));
+        $first = new RenderedDocument('first', $target, latestSnapshotWins: true);
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+        Documents::publishWithResult($first);
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Published)
+            ->and(DB::table('document_coalescing_targets')->whereNotNull('pending')->exists())->toBeFalse();
+        $same = new RenderedDocument('first', $target, latestSnapshotWins: true);
+        Documents::publishIfChanged($same);
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Published)
+            ->and(DB::table('document_coalescing_targets')->whereNotNull('pending')->exists())->toBeFalse();
+    });
+});
+
+it('encrypts pending snapshots and recovers legacy plaintext snapshots', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('queue.default', 'database');
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        $context = new FilesystemDocumentStorageContext('invoices/encrypted-pending.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $rendered = new RenderedDocument('private HTML', $target, latestSnapshotWins: true);
+        $stored = DB::table('document_coalescing_targets')->value('pending');
+        expect($stored)->not->toContain('private HTML')
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+        $legacy = json_encode([
+            'html' => 'private HTML', 'storage' => 'versioned', 'path' => $context->path,
+            'disk' => $context->disk, 'driver' => 'default', 'snapshot' => $rendered->snapshotId,
+        ], JSON_THROW_ON_ERROR);
+        DB::table('document_coalescing_targets')->update(['pending' => $legacy]);
+        $this->artisan('documents:recover')->assertSuccessful();
+        $this->artisan('queue:work', ['connection' => 'database', '--once' => true])->assertSuccessful();
+        expect((new VersionedDocumentStorage)->get($context))->toBe('private HTML');
+    });
+});
+
+it('recovers encrypted snapshots after key rotation and rejects invalid ciphertext', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('queue.default', 'database');
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        $context = new FilesystemDocumentStorageContext('invoices/rotated-key.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        new RenderedDocument('protected HTML', $target, latestSnapshotWins: true);
+        $pending = DB::table('document_coalescing_targets')->value('pending');
+        $oldKey = Config::get('app.key');
+        Config::set('app.key', 'base64:'.base64_encode(str_repeat('u', 32)));
+        $this->app->forgetInstance('encrypter');
+        Crypt::clearResolvedInstance('encrypter');
+        expect(fn () => Documents::targetStatus($target))->toThrow(DecryptException::class)
+            ->and(DB::table('document_coalescing_targets')->value('pending'))->toBe($pending);
+        Config::set('app.key', null);
+        $this->app->forgetInstance('encrypter');
+        Crypt::clearResolvedInstance('encrypter');
+        expect(fn () => Documents::targetStatus($target))->toThrow(MissingAppKeyException::class)
+            ->and(DB::table('document_coalescing_targets')->value('pending'))->toBe($pending);
+        Config::set('app.key', 'base64:'.base64_encode(str_repeat('u', 32)));
+        Config::set('app.previous_keys', [$oldKey]);
+        $this->app->forgetInstance('encrypter');
+        Crypt::clearResolvedInstance('encrypter');
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+        DB::table('document_coalescing_targets')->update(['pending' => 'encrypted:v1:invalid']);
+        expect(fn () => Documents::targetStatus($target))->toThrow(DecryptException::class);
+        DB::table('document_coalescing_targets')->update(['pending' => $pending]);
+        $this->artisan('documents:recover')->assertSuccessful();
+        $this->artisan('queue:work', ['connection' => 'database', '--once' => true])->assertSuccessful();
+        expect((new VersionedDocumentStorage)->get($context))->toBe('protected HTML');
+    });
+});
+
+it('avoids a second publication when synchronous work finishes during queued generation', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('queue.default', 'database');
+        Event::fake([DocumentStored::class]);
+        $context = new FilesystemDocumentStorageContext('invoices/concurrent-reuse.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $generator = new class extends DocumentGenerator
+        {
+            public function __construct() {}
+
+            protected function generateContents(RenderedDocument $rendered): string
+            {
+                Documents::publishWithResult(new GeneratedDocument($rendered, 'synchronous PDF', 'sync'));
+
+                return 'queued PDF';
+            }
+        };
+        $this->app->instance(DocumentGenerator::class, $generator);
+        Documents::dispatchCoalesced(new RenderedDocument('same', $target, latestSnapshotWins: true));
+        $this->artisan('queue:work', ['connection' => 'database', '--once' => true])->assertSuccessful();
+        $storage = new VersionedDocumentStorage;
+        expect($storage->get($context))->toBe('synchronous PDF')
+            ->and($storage->versions($context))->toHaveCount(1);
+        Event::assertDispatchedTimes(DocumentStored::class, 1);
+    });
+});
+
+it('reuses the first queued publication when synchronous generation finishes later', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Event::fake([DocumentStored::class]);
+        $context = new FilesystemDocumentStorageContext('invoices/first-queued.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $snapshot = new RenderedDocument('same', $target, latestSnapshotWins: true);
+        $row = DB::table('document_coalescing_targets')->first();
+        $generator = new class($row->target_key, $row->worker_token) extends DocumentGenerator
+        {
+            private int $calls = 0;
+
+            public function __construct(private string $key, private string $token) {}
+
+            protected function generateContents(RenderedDocument $rendered): string
+            {
+                if (++$this->calls === 1) {
+                    app(DocumentCoalescer::class)->work($this->key, $this->token);
+
+                    return 'synchronous PDF';
+                }
+
+                return 'queued PDF';
+            }
+        };
+        $this->app->instance(DocumentGenerator::class, $generator);
+        $result = Documents::publishWithResult($snapshot);
+        $storage = new VersionedDocumentStorage;
+        expect($result->version)->toBe($storage->versions($context)[0])
+            ->and($storage->get($context))->toBe('queued PDF')
+            ->and($storage->versions($context))->toHaveCount(1);
+        Event::assertDispatchedTimes(DocumentStored::class, 1);
+    });
+});
+
+it('publishes again when the first matching version has lost its PDF', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Event::fake([DocumentStored::class]);
+        $context = new FilesystemDocumentStorageContext('invoices/first-missing.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $snapshot = new RenderedDocument('same', $target, latestSnapshotWins: true);
+        $first = Documents::publishWithResult(new GeneratedDocument($snapshot, 'first PDF', 'first'));
+        Storage::disk('documents')->delete("invoices/first-missing.pdf/{$first->version}/document.pdf");
+        $second = Documents::publishWithResult(new GeneratedDocument($snapshot, 'replacement PDF', 'second'));
+        expect($second->version)->not->toBe($first->version)
+            ->and((new VersionedDocumentStorage)->get($context))->toBe('replacement PDF');
+        Event::assertDispatchedTimes(DocumentStored::class, 2);
+    });
+});
+
+it('retains document metadata in encrypted snapshots and treats changes as new work', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('queue.default', 'database');
+        $this->app->instance(DocumentGenerator::class, new class extends DocumentGenerator
+        {
+            public function __construct() {}
+
+            protected function generateContents(RenderedDocument $rendered): string
+            {
+                return $rendered->html.':'.$rendered->metadata?->title;
+            }
+        });
+        $context = new FilesystemDocumentStorageContext('invoices/metadata.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $first = new RenderedDocument('same', $target, latestSnapshotWins: true, metadata: new DocumentMetadata(title: 'private first'));
+        $latest = new RenderedDocument('same', $target, latestSnapshotWins: true, metadata: new DocumentMetadata(title: 'private second'));
+        expect($latest->snapshotId)->not->toBe($first->snapshotId)
+            ->and(DB::table('document_coalescing_targets')->value('pending'))->not->toContain('private second');
+        $this->artisan('documents:recover')->assertSuccessful();
+        $this->artisan('queue:work', ['connection' => 'database', '--once' => true])->assertSuccessful();
+        expect((new VersionedDocumentStorage)->get($context))->toBe('same:private second')
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Published);
+    });
+});
+
+it('rejects malformed metadata in a pending snapshot without clearing it', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $context = new FilesystemDocumentStorageContext('invoices/invalid-metadata.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        new RenderedDocument('same', $target, latestSnapshotWins: true, metadata: new DocumentMetadata(title: 'title'));
+        $stored = DB::table('document_coalescing_targets')->value('pending');
+        $payload = json_decode(Crypt::decryptString(substr($stored, strlen('encrypted:v1:'))), true, flags: JSON_THROW_ON_ERROR);
+        $payload['metadata']['title'] = ['invalid'];
+        $invalid = 'encrypted:v1:'.Crypt::encryptString(json_encode($payload, JSON_THROW_ON_ERROR));
+        DB::table('document_coalescing_targets')->update(['pending' => $invalid]);
+        expect(fn () => Documents::targetStatus($target))->toThrow(InvalidArgumentException::class, 'metadata is invalid')
+            ->and(DB::table('document_coalescing_targets')->value('pending'))->toBe($invalid);
+    });
+});
+
+it('allows only one overlapping worker to publish the same pending snapshot', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Event::fake([DocumentStored::class]);
+        $context = new FilesystemDocumentStorageContext('invoices/overlapping-workers.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        new RenderedDocument('same', $target, latestSnapshotWins: true);
+        $row = DB::table('document_coalescing_targets')->first();
+        $generator = new class($row->target_key, $row->worker_token) extends DocumentGenerator
+        {
+            private int $calls = 0;
+
+            public function __construct(private string $key, private string $token) {}
+
+            protected function generateContents(RenderedDocument $rendered): string
+            {
+                if (++$this->calls === 1) {
+                    app(DocumentCoalescer::class)->work($this->key, $this->token);
+
+                    return 'first worker';
+                }
+
+                return 'second worker';
+            }
+        };
+        $this->app->instance(DocumentGenerator::class, $generator);
+        app(DocumentCoalescer::class)->work($row->target_key, $row->worker_token);
+        $storage = new VersionedDocumentStorage;
+        expect($storage->get($context))->toBe('second worker')
+            ->and($storage->versions($context))->toHaveCount(1)
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Published);
+        Event::assertDispatchedTimes(DocumentStored::class, 1);
+    });
+});
+
+it('abandons a worker that loses ownership without clearing the replacement work', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Event::fake([DocumentStored::class]);
+        $context = new FilesystemDocumentStorageContext('invoices/replaced-worker.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        new RenderedDocument('same', $target, latestSnapshotWins: true);
+        $row = DB::table('document_coalescing_targets')->first();
+        $generator = new class extends DocumentGenerator
+        {
+            public function __construct() {}
+
+            protected function generateContents(RenderedDocument $rendered): string
+            {
+                DB::table('document_coalescing_targets')->update(['worker_token' => 'replacement']);
+
+                return 'obsolete worker';
+            }
+        };
+        $this->app->instance(DocumentGenerator::class, $generator);
+        app(DocumentCoalescer::class)->work($row->target_key, $row->worker_token);
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending)
+            ->and(DB::table('document_coalescing_targets')->value('worker_token'))->toBe('replacement')
+            ->and(DB::table('document_coalescing_stages')->count())->toBe(0);
+        Event::assertNotDispatched(DocumentStored::class);
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        app(DocumentCoalescer::class)->work($row->target_key, 'replacement');
+        expect((new VersionedDocumentStorage)->get($context))->toBe('same');
+        Event::assertDispatchedTimes(DocumentStored::class, 1);
+    });
+});
+
+it('continues recovering other targets and stages when one wakeup fails', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('queue.default', 'database');
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        $bad = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/recovery-bad.pdf', 'documents'));
+        $goodContext = new FilesystemDocumentStorageContext('invoices/recovery-good.pdf', 'documents');
+        $good = new DocumentTarget('versioned', $goodContext);
+        new RenderedDocument('bad', $bad, latestSnapshotWins: true);
+        new RenderedDocument('good', $good, latestSnapshotWins: true);
+        DB::table('document_coalescing_targets')->where('target_key', hash('sha256', $bad->context->identity()))
+            ->update(['queue_connection' => 'missing']);
+        $handler = VersionedStorage::directory('invoices/recovery-stage.pdf', disk: 'documents');
+        $stage = $handler->stage(function (FilesystemAdapter $files, string $version): void {
+            DB::table('document_coalescing_stages')->insert([
+                'version' => $version, 'target_key' => str_repeat('a', 64), 'created_at' => now()->subHours(2),
+            ]);
+            $files->put('document.pdf', 'abandoned');
+        });
+
+        expect(fn () => app(DocumentCoalescer::class)->recover())->toThrow(InvalidArgumentException::class);
+        expect(DB::table('document_coalescing_stages')->where('version', $stage->version)->exists())->toBeFalse()
+            ->and(Documents::targetStatus($bad))->toBe(DocumentTargetStatus::Pending);
+        $this->artisan('queue:work', ['connection' => 'database', '--once' => true])->assertSuccessful();
+        expect((new VersionedDocumentStorage)->get($goodContext))->toBe('good');
+    });
+});
+
+it('continues reclaiming other stages after one stage fails', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $handler = VersionedStorage::directory('invoices/stage-recovery-isolation.pdf', disk: 'documents');
+        $write = function (FilesystemAdapter $files, string $version): void {
+            DB::table('document_coalescing_stages')->insert([
+                'version' => $version, 'target_key' => str_repeat('a', 64), 'created_at' => now()->subHours(2),
+            ]);
+            $files->put('document.pdf', 'abandoned');
+        };
+        $bad = $handler->stage($write);
+        $good = $handler->stage($write);
+        DB::unprepared("CREATE TRIGGER reject_stage_recovery BEFORE UPDATE ON document_coalescing_stages WHEN OLD.version = '{$bad->version}' BEGIN SELECT RAISE(FAIL, 'reject stage'); END");
+
+        expect(fn () => app(DocumentCoalescer::class)->recover())->toThrow(QueryException::class, 'reject stage');
+        expect(DB::table('document_coalescing_stages')->where('version', $bad->version)->exists())->toBeTrue()
+            ->and(DB::table('document_coalescing_stages')->where('version', $good->version)->exists())->toBeFalse();
+        DB::unprepared('DROP TRIGGER reject_stage_recovery');
+        app(DocumentCoalescer::class)->recover();
+        expect(DB::table('document_coalescing_stages')->where('version', $bad->version)->exists())->toBeFalse();
     });
 });
 
@@ -825,7 +1156,8 @@ it('does not publish an older stage when a new snapshot registers during staging
 
         expect(Documents::publishWithResult($older)->status)->toBe(DocumentPublicationStatus::Superseded)
             ->and($storage->versions($context))->toBe([])
-            ->and(DB::table('document_coalescing_stages')->count())->toBe(0);
+            ->and(DB::table('document_coalescing_stages')->count())->toBe(0)
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
     });
 });
 

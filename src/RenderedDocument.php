@@ -34,6 +34,7 @@ final readonly class RenderedDocument
         public string $driver = 'default',
         ?bool $latestSnapshotWins = null,
         ?string $registeredSnapshotId = null,
+        public ?DocumentMetadata $metadata = null,
     ) {
         if ($driver === '') {
             throw new InvalidArgumentException('The document PDF driver configuration cannot be empty.');
@@ -56,18 +57,24 @@ final readonly class RenderedDocument
 
         $this->snapshotId = $registeredSnapshotId ?? ($latestSnapshotWins
             ? (config('laravel-documents.coalescing.enabled')
-                ? app(DocumentCoalescer::class)->capture($this->html, $this->target, $this->driver)
+                ? app(DocumentCoalescer::class)->capture($this->html, $this->target, $this->driver, $this->metadata)
                 : app(DocumentSnapshotCache::class)->register($this->target, $this->fingerprint()))
             : null);
     }
 
     public function fingerprint(): string
     {
-        return self::fingerprintFor($this->html, $this->target, $this->driver);
+        return self::fingerprintFor($this->html, $this->target, $this->driver, $this->metadata ?? null);
     }
 
-    public static function fingerprintFor(string $html, DocumentTarget $target, string $driver): string
+    public static function fingerprintFor(string $html, DocumentTarget $target, string $driver, ?DocumentMetadata $metadata = null): string
     {
-        return hash('sha256', serialize([$html, $target, $driver]));
+        $identity = [$html, $target, $driver];
+
+        if ($metadata !== null) {
+            $identity[] = $metadata->toArray();
+        }
+
+        return hash('sha256', serialize($identity));
     }
 }

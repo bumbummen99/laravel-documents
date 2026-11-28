@@ -52,9 +52,14 @@ class DocumentGenerator
      */
     protected function generateContents(RenderedDocument $rendered): string
     {
-        return $this->drivers
+        $builder = $this->drivers
             ->builder($rendered->driver)
-            ->html($rendered->html)
-            ->generatePdfContent();
+            ->html($rendered->html);
+
+        if (($rendered->metadata ?? null) !== null) {
+            $builder->meta(...$rendered->metadata->toArray());
+        }
+
+        return $builder->generatePdfContent();
     }
 }

@@ -42,6 +42,10 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   to skip rendering and generated input for publication to skip generation too.
   The low-level `DocumentGenerator` accepts only `RenderedDocument` and returns
   `GeneratedDocument`; `DocumentPublisher` accepts only `GeneratedDocument`.
+- Override `Document::metadata()` to return immutable `DocumentMetadata` with
+  title, author, subject, keywords, creator, and creation date. It is captured
+  with HTML, affects the fingerprint, and replaces builder metadata. A null
+  result leaves builder metadata intact but does not freeze or fingerprint it.
 - Use `Documents::publishWithResult()` (or the publisher's method for generated
   input) to distinguish `DocumentPublicationStatus::Published` from
   `Superseded`. The result's `version` may be null even when published; failures
@@ -92,7 +96,11 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   Recovery can queue it without explicit dispatch, using the default queue if
   none was selected. Use `$document->html()` for HTML-only previews and secure
   the application route. Concurrent synchronous and queued generation can
-  produce duplicates. Recovery preserves wakeups through long backlogs.
+  produce duplicates. The first matching PDF publication wins; subsequent
+  attempts reuse its version without a stored event, even if bytes differ. A
+  missing PDF is regenerated. Successful publication or synchronous reuse clears
+  matching pending work, not newer snapshots. Recovery attempts other targets
+  and stages after individual failures, then rethrows the first error.
 - `Documents::tombstoneTarget($target)` fences existing snapshots and rejects
   registrations until `Documents::restoreTarget($target)`. Both can participate
   in a Laravel-managed transaction on the shared metadata connection. Neither
@@ -103,8 +111,12 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   active transaction. `Documents::targetStatus($target)` reports shared
   `NotScheduled`, `Pending`, `Published`, or `Tombstoned` state. Pending
   includes failed attempts awaiting recovery; Published does not check the file.
-- Coalescing persists the latest HTML in plaintext until processing finishes.
-  Protect the database and backups. Target ordering records must remain while
+- Pending snapshots use Laravel application-key encryption; legacy plaintext
+  remains readable. Share the key across processes, retain previous keys while
+  pending work needs them, and protect older backups and other plaintext copies.
+  Older versions cannot read encrypted rows: pause rendering, workers and
+  recovery during upgrade and restart all processes before resuming.
+  Encryption does not cover metadata or PDFs. Target ordering records must remain while
   old snapshots or jobs may exist. Set the recovery lease and stage-retention
   duration above expected work durations; recovery and queue retries are at
   least once, and slow stages can be reclaimed and need retrying. Monitor errors.

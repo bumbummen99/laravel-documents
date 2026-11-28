@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace SkyRaptor\LaravelDocuments;
 
+use LogicException;
 use SkyRaptor\LaravelDocuments\Events\DispatchesDocumentEvents;
 use SkyRaptor\LaravelDocuments\Events\DocumentRenderFailed;
 use SkyRaptor\LaravelDocuments\Events\DocumentStored;
@@ -37,7 +38,19 @@ class DocumentPublisher
      */
     public function publishWithResult(GeneratedDocument $generated): DocumentPublicationResult
     {
+        return $this->publishAttempt($generated) ?? throw new LogicException('An explicit publication cannot be abandoned.');
+    }
+
+    public function publishCoalescedAttempt(GeneratedDocument $generated, string $token): void
+    {
+        $this->publishAttempt($generated, $token);
+    }
+
+    private function publishAttempt(GeneratedDocument $generated, ?string $workerToken = null): ?DocumentPublicationResult
+    {
         $target = $generated->target;
+        $abandoned = false;
+        $reused = false;
 
         try {
             $storage = $this->storage->resolve($target->storage);
@@ -50,7 +63,18 @@ class DocumentPublisher
                 ));
             };
             $version = config('laravel-documents.coalescing.enabled')
-                ? app(DocumentCoalescer::class)->publish($generated, $storage, $superseded)
+                ? app(DocumentCoalescer::class)->publish(
+                    $generated,
+                    $storage,
+                    $superseded,
+                    $workerToken,
+                    function () use (&$abandoned): void {
+                        $abandoned = true;
+                    },
+                    function () use (&$reused): void {
+                        $reused = true;
+                    },
+                )
                 : $this->snapshots->publish(
                     $generated,
                     fn () => $storage->write($target->context, $generated->contents),
@@ -67,11 +91,17 @@ class DocumentPublisher
             throw $exception;
         }
 
+        if ($abandoned) {
+            return null;
+        }
+
         if ($version === false) {
             return DocumentPublicationResult::superseded();
         }
 
-        $this->dispatchDocumentEvent(new DocumentStored($target, $generated->generationId, $version));
+        if (! $reused) {
+            $this->dispatchDocumentEvent(new DocumentStored($target, $generated->generationId, $version));
+        }
 
         return DocumentPublicationResult::published($version);
     }
