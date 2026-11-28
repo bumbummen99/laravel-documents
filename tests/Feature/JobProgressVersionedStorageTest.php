@@ -21,6 +21,7 @@ use SkyRaptor\LaravelDocuments\DocumentPublicationStatus;
 use SkyRaptor\LaravelDocuments\Documents\Document;
 use SkyRaptor\LaravelDocuments\DocumentSnapshotCache;
 use SkyRaptor\LaravelDocuments\DocumentTarget;
+use SkyRaptor\LaravelDocuments\DocumentTargetStatus;
 use SkyRaptor\LaravelDocuments\Events\DocumentStored;
 use SkyRaptor\LaravelDocuments\Facades\Documents;
 use SkyRaptor\LaravelDocuments\GeneratedDocument;
@@ -87,6 +88,12 @@ function withRealVersionedStorage(Closure $test): void
     }
 }
 
+function createCoalescingTables(): void
+{
+    (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+    (require dirname(__DIR__, 2).'/database/migrations/2026_11_28_100710_add_tombstone_to_document_coalescing_targets.php')->up();
+}
+
 beforeEach(function () {
     if (! trait_exists(Progress::class) || ! class_exists(VersionedStorage::class)
         || ! function_exists('pcntl_fork') || ! function_exists('posix_kill') || ! extension_loaded('sockets')) {
@@ -98,6 +105,151 @@ beforeEach(function () {
     $this->app->make(Kernel::class)->rerouteSymfonyCommandEvents();
     Config::set('job-progress.cache.store', 'array');
     Storage::fake('documents');
+});
+
+it('tombstones deleted targets until explicitly restored', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        $context = new FilesystemDocumentStorageContext('invoices/deleted-permanently.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $old = new RenderedDocument('old', $target, latestSnapshotWins: true);
+        Documents::publishWithResult($old);
+        Documents::tombstoneTarget($target);
+        expect((new VersionedDocumentStorage)->get($context))->toBe('old');
+        $document = new class($target) extends Document
+        {
+            public static ?bool $latestSnapshotWins = true;
+
+            public function __construct(private DocumentTarget $target) {}
+
+            public function html(): string
+            {
+                return 'direct';
+            }
+
+            public function target(): DocumentTarget
+            {
+                return $this->target;
+            }
+
+            public function path(): string
+            {
+                return 'unused';
+            }
+        };
+
+        expect(fn () => new RenderedDocument('stale request', $target, latestSnapshotWins: true))
+            ->toThrow(LogicException::class, 'deleted');
+        expect(fn () => Documents::dispatchCoalesced($document))->toThrow(LogicException::class, 'deleted');
+        expect(Documents::dispatchCoalesced($old))->toBeFalse();
+        Documents::invalidate($target);
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Tombstoned);
+        DB::beginTransaction();
+        Documents::restoreTarget($target);
+        DB::rollBack();
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Tombstoned);
+        Documents::restoreTarget($target);
+        $new = new RenderedDocument('new', $target, latestSnapshotWins: true);
+        expect($new->snapshotId)->not->toBe($old->snapshotId)
+            ->and(Documents::dispatchCoalesced($old))->toBeFalse();
+    });
+});
+
+it('does not reuse a publication superseded during its existence check', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        $context = new FilesystemDocumentStorageContext('invoices/reuse-race.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $rendered = new RenderedDocument('old', $target, latestSnapshotWins: true);
+        Documents::publishWithResult($rendered);
+        $storage = new class($target) extends VersionedDocumentStorage
+        {
+            public function __construct(private DocumentTarget $target)
+            {
+                parent::__construct();
+            }
+
+            public function exists(DocumentStorageContext $context, ?string $version = null): bool
+            {
+                $exists = parent::exists($context, $version);
+                new RenderedDocument('new', $this->target, latestSnapshotWins: true);
+
+                return $exists;
+            }
+        };
+        app(DocumentStorageManager::class)->register('versioned', fn () => $storage, GenerateVersionedDocument::class);
+        expect(Documents::publishIfChanged($rendered)->status)->toBe(DocumentPublicationStatus::Superseded);
+    });
+});
+
+it('reuses an unchanged synchronous PDF and regenerates when its version is missing', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        $context = new FilesystemDocumentStorageContext('invoices/reuse.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $rendered = new RenderedDocument('same', $target, latestSnapshotWins: true);
+        $first = Documents::publishIfChanged($rendered);
+        $second = Documents::publishIfChanged(new RenderedDocument('same', $target, latestSnapshotWins: true));
+        $storage = new VersionedDocumentStorage;
+        expect($second->status)->toBe(DocumentPublicationStatus::Published)
+            ->and($second->version)->toBe($first->version)
+            ->and($storage->versions($context))->toHaveCount(1);
+        Storage::disk('documents')->delete("invoices/reuse.pdf/{$first->version}/document.pdf");
+        $third = Documents::publishIfChanged($rendered);
+        expect($third->version)->not->toBe($first->version)
+            ->and($storage->get($context))->toBe('same');
+        new RenderedDocument('newer', $target, latestSnapshotWins: true);
+        expect(Documents::publishIfChanged($rendered)->status)->toBe(DocumentPublicationStatus::Superseded);
+    });
+});
+
+it('reports shared target state across joined requests, recovery, publication, and deletion', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('queue.default', 'database');
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        $target = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/status.pdf', 'documents'));
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::NotScheduled);
+        $first = new RenderedDocument('first', $target, latestSnapshotWins: true);
+        Documents::dispatchCoalesced($first);
+        Documents::dispatchCoalesced(new RenderedDocument('last', $target, latestSnapshotWins: true));
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+        DB::table('document_coalescing_targets')->update(['lease_until' => now()->subMinute()]);
+        app(DocumentCoalescer::class)->recover();
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+        $this->artisan('queue:work', ['connection' => 'database', '--once' => true])->assertSuccessful();
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Published);
+        new RenderedDocument('not queued', $target, latestSnapshotWins: true);
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::NotScheduled);
+        Documents::tombstoneTarget($target);
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Tombstoned);
+        Documents::restoreTarget($target);
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::NotScheduled);
+    });
+});
+
+it('rolls back tombstones with the owning database transaction', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Bus::fake();
+        $target = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/rollback.pdf', 'documents'));
+        $rendered = new RenderedDocument('queued', $target, latestSnapshotWins: true);
+        Documents::dispatchCoalesced($rendered);
+        DB::beginTransaction();
+        Documents::tombstoneTarget($target);
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Tombstoned);
+        DB::rollBack();
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending)
+            ->and(Documents::dispatchCoalesced($rendered))->toBeTrue();
+    });
 });
 
 it('tracks queued batch jobs while storing real document versions', function () {
@@ -213,7 +365,7 @@ it('can journal a stage before it becomes ready and recover it after a publicati
 
 it('coalesces queued snapshots and preserves newer synchronous publications', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         Config::set('queue.default', 'database');
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
@@ -244,7 +396,7 @@ it('coalesces queued snapshots and preserves newer synchronous publications', fu
 
 it('rejects a stale generated snapshot and can recover an undispatched request', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         Config::set('queue.default', 'database');
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
@@ -266,7 +418,7 @@ it('rejects a stale generated snapshot and can recover an undispatched request',
 
 it('processes the oldest queued wakeup after repeated recovery during a long backlog', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         Config::set('queue.default', 'database');
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
@@ -288,7 +440,7 @@ it('processes the oldest queued wakeup after repeated recovery during a long bac
 
 it('registers queued document content atomically with the recoverable pending snapshot', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         Config::set('queue.default', 'database');
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
@@ -334,7 +486,7 @@ it('registers queued document content atomically with the recoverable pending sn
 
 it('preserves equivalent and A to B to A ordering during atomic document capture', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         Config::set('queue.default', 'database');
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
@@ -380,7 +532,7 @@ it('preserves equivalent and A to B to A ordering during atomic document capture
 
 it('invalidates queued and generated snapshots without reviving them after rollback', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         Config::set('queue.default', 'database');
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
@@ -404,7 +556,7 @@ it('invalidates queued and generated snapshots without reviving them after rollb
 
 it('deduplicates equivalent snapshots but assigns a new ID after returning to earlier content', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         Config::set('queue.default', 'database');
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
@@ -430,7 +582,7 @@ it('deduplicates equivalent snapshots but assigns a new ID after returning to ea
 
 it('processes the newest snapshot requested while a worker is generating', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         Config::set('queue.default', 'database');
         $context = new FilesystemDocumentStorageContext('invoices/during-generation.pdf', 'documents');
@@ -465,7 +617,7 @@ it('processes the newest snapshot requested while a worker is generating', funct
 
 it('recovers terminal worker failures and regenerates a missing current PDF', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         Config::set('queue.default', 'database');
         $context = new FilesystemDocumentStorageContext('invoices/failed-worker.pdf', 'documents');
@@ -476,12 +628,14 @@ it('recovers terminal worker failures and regenerates a missing current PDF', fu
         $rendered = new RenderedDocument('retry', $target, latestSnapshotWins: true);
         Documents::dispatchCoalesced($rendered);
         $this->artisan('queue:work', ['connection' => 'database', '--once' => true, '--tries' => 1])->assertSuccessful();
-        expect(DB::table('document_coalescing_targets')->whereNotNull('pending')->exists())->toBeTrue();
+        expect(DB::table('document_coalescing_targets')->whereNotNull('pending')->exists())->toBeTrue()
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
 
         $this->app->instance(DocumentGenerator::class, $this->app->make(HtmlDocumentGenerator::class));
         DB::table('document_coalescing_targets')->update(['lease_until' => now()->subMinute()]);
         $this->artisan('documents:recover')->assertSuccessful();
         $this->artisan('queue:work', ['connection' => 'database', '--once' => true])->assertSuccessful();
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Published);
         $storage = new VersionedDocumentStorage;
         $version = $storage->versions($context)[0];
         Storage::disk('documents')->delete("invoices/failed-worker.pdf/{$version}/document.pdf");
@@ -493,9 +647,40 @@ it('recovers terminal worker failures and regenerates a missing current PDF', fu
     });
 });
 
+it('fences a staged publication when the target is tombstoned and restored', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        $context = new FilesystemDocumentStorageContext('invoices/deletion-race.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $storage = new class($target) extends VersionedDocumentStorage
+        {
+            public function __construct(private DocumentTarget $target)
+            {
+                parent::__construct();
+            }
+
+            public function stage(DocumentStorageContext $context, string $contents, Closure $record): StagedVersion
+            {
+                $stage = parent::stage($context, $contents, $record);
+                Documents::tombstoneTarget($this->target);
+                Documents::restoreTarget($this->target);
+
+                return $stage;
+            }
+        };
+        app(DocumentStorageManager::class)->register('versioned', fn () => $storage, GenerateVersionedDocument::class);
+        $old = new RenderedDocument('old', $target, latestSnapshotWins: true);
+        expect(Documents::publishWithResult($old)->status)->toBe(DocumentPublicationStatus::Superseded)
+            ->and($storage->versions($context))->toBe([])
+            ->and(DB::table('document_coalescing_stages')->count())->toBe(0);
+    });
+});
+
 it('does not publish an older stage when a new snapshot registers during staging', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
         $context = new FilesystemDocumentStorageContext('invoices/stage-race.pdf', 'documents');
@@ -526,7 +711,7 @@ it('does not publish an older stage when a new snapshot registers during staging
 
 it('does not publish a stage invalidated while it was being written', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
         $context = new FilesystemDocumentStorageContext('invoices/deleted-during-stage.pdf', 'documents');
@@ -556,7 +741,7 @@ it('does not publish a stage invalidated while it was being written', function (
 
 it('does not let a staged older publication overwrite a newer publication from another process', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
         $context = new FilesystemDocumentStorageContext('invoices/concurrent.pdf', 'documents');
@@ -614,7 +799,7 @@ it('does not let a staged older publication overwrite a newer publication from a
 
 it('fails rather than publishing a stage reclaimed while its publisher was delayed', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
         $context = new FilesystemDocumentStorageContext('invoices/reclaimed.pdf', 'documents');
@@ -641,7 +826,7 @@ it('fails rather than publishing a stage reclaimed while its publisher was delay
 
 it('rolls back the version switch when the ordered fingerprint update fails', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
         $context = new FilesystemDocumentStorageContext('invoices/transaction-rollback.pdf', 'documents');
@@ -667,7 +852,7 @@ it('rolls back the version switch when the ordered fingerprint update fails', fu
 
 it('recovers a request after dispatch fails and discards abandoned ready stages', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         Config::set('queue.default', 'database');
         $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
@@ -696,7 +881,7 @@ it('recovers a request after dispatch fails and discards abandoned ready stages'
 
 it('rejects unsupported storage, active transactions, and different metadata connections', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         $versioned = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/guard.pdf', 'documents'));
         $disk = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/guard.pdf', 'documents'));
@@ -720,7 +905,7 @@ it('rejects unsupported storage, active transactions, and different metadata con
 
 it('fails closed if a worker runs with coalescing disabled or bypasses staged publication', function () {
     withRealVersionedStorage(function () {
-        (require dirname(__DIR__, 2).'/database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')->up();
+        createCoalescingTables();
         Config::set('laravel-documents.coalescing.enabled', true);
         $target = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/disabled.pdf', 'documents'));
         $rendered = new RenderedDocument('A', $target, latestSnapshotWins: true);

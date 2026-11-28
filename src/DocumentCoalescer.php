@@ -44,6 +44,10 @@ final class DocumentCoalescer
             $key = $this->key($target);
             $row = $this->lockTarget($connection, $key);
 
+            if ($row->tombstoned) {
+                throw new LogicException('Cannot register a snapshot for a deleted document target.');
+            }
+
             if ($fingerprint !== null && $row->latest_fingerprint === $fingerprint && is_string($row->latest_snapshot)) {
                 return $row->latest_snapshot;
             }
@@ -67,7 +71,111 @@ final class DocumentCoalescer
         return $row === null || $row->published_fingerprint !== $rendered->fingerprint();
     }
 
+    public function status(DocumentTarget $target): DocumentTargetStatus
+    {
+        $this->assertEnabled();
+        $this->assertTarget($target);
+        $row = $this->connection()->table('document_coalescing_targets')->useWritePdo()
+            ->where('target_key', $this->key($target))->first();
+
+        if ($row === null) {
+            return DocumentTargetStatus::NotScheduled;
+        }
+
+        if ($row->tombstoned) {
+            return DocumentTargetStatus::Tombstoned;
+        }
+
+        if (is_string($row->pending)) {
+            $pending = $this->decodeSnapshot($row->pending);
+
+            if ($pending->snapshotId === $row->latest_snapshot) {
+                return DocumentTargetStatus::Pending;
+            }
+        }
+
+        if (is_string($row->latest_fingerprint) && $row->latest_fingerprint === $row->published_fingerprint) {
+            return DocumentTargetStatus::Published;
+        }
+
+        return DocumentTargetStatus::NotScheduled;
+    }
+
+    public function existingPublication(RenderedDocument $rendered): ?DocumentPublicationResult
+    {
+        $this->assertEnabled();
+        $this->assertTarget($rendered->target);
+
+        if ($rendered->snapshotId === null) {
+            throw new LogicException('Synchronous reuse requires an ordered rendered snapshot.');
+        }
+        $connection = $this->connection();
+        $this->assertOutsideTransaction($connection);
+        $key = $this->key($rendered->target);
+        $row = $connection->table('document_coalescing_targets')->useWritePdo()->where('target_key', $key)->first();
+
+        if ($row === null || $row->latest_snapshot !== $rendered->snapshotId) {
+            return DocumentPublicationResult::superseded();
+        }
+
+        if ($row->latest_fingerprint !== $rendered->fingerprint()) {
+            throw new RuntimeException('The rendered document fingerprint does not match its registered snapshot.');
+        }
+
+        if ($row->published_fingerprint !== $rendered->fingerprint() || ! is_string($row->published_version)) {
+            return null;
+        }
+        $version = $row->published_version;
+        $storage = $this->storage->resolve($rendered->target->storage);
+
+        if (! $storage->exists($rendered->target->context, $version)) {
+            return null;
+        }
+
+        return $connection->transaction(function () use ($connection, $key, $rendered, $version): ?DocumentPublicationResult {
+            $current = $this->lockTarget($connection, $key);
+
+            if ($current->latest_snapshot !== $rendered->snapshotId) {
+                return DocumentPublicationResult::superseded();
+            }
+
+            if ($current->latest_fingerprint !== $rendered->fingerprint()) {
+                throw new RuntimeException('The rendered document fingerprint does not match its registered snapshot.');
+            }
+
+            return $current->published_version === $version && $current->published_fingerprint === $rendered->fingerprint()
+                ? DocumentPublicationResult::published($version)
+                : null;
+        }, 5);
+    }
+
     public function invalidate(DocumentTarget $target): void
+    {
+        $this->resetTarget($target, false);
+    }
+
+    public function tombstone(DocumentTarget $target): void
+    {
+        $this->resetTarget($target, true);
+    }
+
+    public function restore(DocumentTarget $target): void
+    {
+        $this->assertEnabled();
+        $this->assertTarget($target);
+        $connection = $this->connection();
+
+        if ($connection->transactionLevel() === 0 && $connection->getPdo()->inTransaction()) {
+            throw new LogicException('Document restoration requires a Laravel-managed transaction.');
+        }
+        $key = $this->key($target);
+        $connection->transaction(function () use ($connection, $key): void {
+            $this->lockTarget($connection, $key);
+            $connection->table('document_coalescing_targets')->where('target_key', $key)->update(['tombstoned' => false]);
+        }, 5);
+    }
+
+    private function resetTarget(DocumentTarget $target, bool $tombstone): void
     {
         $this->assertEnabled();
         $this->assertTarget($target);
@@ -77,12 +185,14 @@ final class DocumentCoalescer
             throw new LogicException('Document invalidation requires a Laravel-managed transaction.');
         }
         $key = $this->key($target);
-        $connection->transaction(function () use ($connection, $key): void {
-            $this->lockTarget($connection, $key);
+        $connection->transaction(function () use ($connection, $key, $tombstone): void {
+            $row = $this->lockTarget($connection, $key);
             $connection->table('document_coalescing_targets')->where('target_key', $key)->update([
+                'tombstoned' => $tombstone || $row->tombstoned,
                 'latest_snapshot' => (string) Str::uuid(),
                 'latest_fingerprint' => null,
                 'published_fingerprint' => null,
+                'published_version' => null,
                 'pending' => null,
                 'worker_token' => null,
                 'lease_until' => null,
@@ -133,7 +243,7 @@ final class DocumentCoalescer
 
             $stage->publish($storage->cleanup);
             $connection->table('document_coalescing_targets')->where('target_key', $key)
-                ->update(['published_fingerprint' => $generated->fingerprint]);
+                ->update(['published_fingerprint' => $generated->fingerprint, 'published_version' => $stage->version]);
             $connection->table('document_coalescing_stages')->where('version', $stage->version)->delete();
 
             return true;
@@ -185,6 +295,14 @@ final class DocumentCoalescer
         $fingerprint = RenderedDocument::fingerprintFor($html, $target, $driver);
         $result = $connection->transaction(function () use ($connection, $key, $html, $target, $driver, $snapshotId, $fingerprint, $queueConnection, $queue): array {
             $row = $this->lockTarget($connection, $key);
+
+            if ($row->tombstoned) {
+                if ($snapshotId !== null) {
+                    return ['accepted' => false, 'token' => null];
+                }
+
+                throw new LogicException('Cannot register a snapshot for a deleted document target.');
+            }
 
             if ($snapshotId !== null && $row->latest_snapshot === $snapshotId && $row->latest_fingerprint !== $fingerprint) {
                 throw new RuntimeException('The rendered document fingerprint does not match its registered snapshot.');

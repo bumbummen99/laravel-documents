@@ -92,11 +92,16 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   not an overridden `render()`. An already-rendered snapshot remains supported
   but has a crash gap between registration and dispatch. Recovery preserves
   existing wakeups through long backlogs; duplicate workers are possible.
-- `Documents::invalidate($document->target())` supersedes existing coalesced
-  snapshots and clears pending work. It can participate in a Laravel-managed
-  transaction on the shared metadata connection. It does not delete PDFs or
-  prevent new registrations, so coordinate record deletion and file cleanup
-  in the application.
+- `Documents::tombstoneTarget($target)` fences existing snapshots and rejects
+  registrations until `Documents::restoreTarget($target)`. Both can participate
+  in a Laravel-managed transaction on the shared metadata connection. Neither
+  deletes PDFs. `Documents::invalidate($target)` fences existing snapshots
+  without blocking new registrations and does not clear a tombstone.
+- `Documents::publishIfChanged($document)` reuses a matching existing version
+  or publishes synchronously; it requires coalescing, ordered snapshots, and no
+  active transaction. `Documents::targetStatus($target)` reports shared
+  `NotScheduled`, `Pending`, `Published`, or `Tombstoned` state. Pending
+  includes failed attempts awaiting recovery; Published does not check the file.
 - Coalescing persists the latest HTML in plaintext until processing finishes.
   Protect the database and backups. Target ordering records must remain while
   old snapshots or jobs may exist. Set the recovery lease and stage-retention

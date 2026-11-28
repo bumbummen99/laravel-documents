@@ -47,6 +47,14 @@ class DocumentWorkflow
         return $this->publisher->publishWithResult($this->prepareForPublication($document, $generationId));
     }
 
+    public function publishIfChanged(Document|RenderedDocument $document): DocumentPublicationResult
+    {
+        $rendered = $document instanceof Document ? $document->render() : $document;
+        $existing = app(DocumentCoalescer::class)->existingPublication($rendered);
+
+        return $existing ?? $this->publishWithResult($rendered);
+    }
+
     private function prepareForPublication(Document|RenderedDocument|GeneratedDocument $document, ?string $generationId): GeneratedDocument
     {
         if ($document instanceof GeneratedDocument) {
@@ -102,5 +110,20 @@ class DocumentWorkflow
     public function invalidate(DocumentTarget $target): void
     {
         app(DocumentCoalescer::class)->invalidate($target);
+    }
+
+    public function targetStatus(DocumentTarget $target): DocumentTargetStatus
+    {
+        return app(DocumentCoalescer::class)->status($target);
+    }
+
+    public function tombstoneTarget(DocumentTarget $target): void
+    {
+        app(DocumentCoalescer::class)->tombstone($target);
+    }
+
+    public function restoreTarget(DocumentTarget $target): void
+    {
+        app(DocumentCoalescer::class)->restore($target);
     }
 }

@@ -507,6 +507,26 @@ PDF exists, the worker skips generation. Conversely, a newer queued snapshot
 supersedes an older synchronous attempt. Registration order is defined after
 rendering, not by source-record revision or the time a request started.
 
+For synchronous generation that may reuse an unchanged PDF, call
+`Documents::publishIfChanged($document)` (or pass an ordered
+`RenderedDocument`). It returns a `DocumentPublicationResult`: an existing
+version is reused only when its fingerprint matches and its file exists;
+otherwise it generates and publishes normally. If a newer snapshot is
+registered during the check, it returns `Superseded`. Reuse requires
+coalescing and versioned storage, and must run outside a database transaction.
+Unlike `publishWithResult()`, reusing a version does not emit a new
+`DocumentStored` event. Versions published before the reuse migration are
+regenerated once because their version identifier was not recorded.
+
+`Documents::targetStatus($document->target())` exposes shared target state:
+`NotScheduled`, `Pending`, `Published`, or `Tombstoned` from
+`DocumentTargetStatus`. `Pending` includes queued, running, failed-attempt,
+and recovery-waiting work; it is not a percentage or a terminal failure.
+`Published` means the latest fingerprint was published, not that the physical
+file has been checked at query time. A newer rendered snapshot that has not
+been queued is `NotScheduled`. This state is shared by all requests for that
+target, not attached to any individual job or requester.
+
 Versioned writes are staged outside a transaction. The target's latest snapshot
 check, current-version switch, and fingerprint update commit together on the
 same database connection. An ID is journaled before a stage can become ready;
@@ -526,19 +546,24 @@ policies. Target ordering rows and fingerprints remain after completion to keep
 old snapshots fenced; do not delete them while old work or snapshots may exist.
 Only trusted processes should be allowed to modify these tables.
 
-Before deleting a document's underlying record, the application can invalidate
-its currently registered and pending work:
+Before deleting a document's underlying record, the application can fence
+existing and future registrations:
 
 ```php
-Documents::invalidate($document->target());
+Documents::tombstoneTarget($document->target());
+// To deliberately allow new work for this target later:
+Documents::restoreTarget($document->target());
 ```
 
-In coalescing mode this atomically supersedes existing snapshots and clears
-pending work. It may run inside the same Laravel-managed transaction as the
-record deletion **when both use the same database connection**. It does not
-delete published PDFs, block later render registrations, or prevent stale
-application code from deliberately submitting new work; applications must
-coordinate those separately. A rollback restores the previous pending work.
+Tombstoning supersedes existing snapshots, clears pending work, and rejects new
+registrations until an explicit restore. Previously captured snapshots remain
+superseded after restoration. These operations may run inside the same
+Laravel-managed transaction as the record deletion or restoration **when both
+use the same database connection**; a rollback restores the previous state.
+Neither operation physically deletes published PDFs or prevents writers that
+bypass this protocol. `Documents::invalidate($target)` remains available when
+only existing snapshots should be superseded without blocking new registrations;
+it does not clear an existing tombstone.
 
 ### Document events
 
