@@ -429,6 +429,30 @@ supersedes earlier opted-in snapshots for that storage-context identity. If the
 content changes from A to B and back to A, the new A gets a new ID and the
 original A remains superseded. Snapshot IDs do not affect content fingerprints.
 
+When a freshness check must not replace a revision registered while source data
+is being loaded, use `DocumentSnapshotCache::captureIfUnchanged($target, $load)`.
+The closure must load a fresh document for the same target with latest-snapshot
+ordering enabled. The method observes the current marker before invoking the
+closure, then conditionally registers under the publication lock. It returns
+`null` if another revision was registered in between; the caller can retry or
+return a conflict. An equivalent current snapshot retains its existing ID.
+This cache-backed API uses the same shared snapshot cache and lock requirements
+as ordinary ordered publication. For coalesced generation use the separate
+`DocumentCoalescer::captureIfUnchanged()` API described below.
+
+For ordered cache-backed snapshots, `DocumentSnapshotCache::existingPublicationStatus($snapshot)`
+checks the latest marker, published fingerprint and storage existence under the
+publication lock without generating a PDF. It returns `DocumentPublicationStatus::Published`
+for a matching file, `DocumentPublicationStatus::Superseded` if another snapshot is current, or `null` if
+publication is needed. The check cannot prevent changes after the lock is released;
+in particular, a later fixed-path download may observe a subsequent publication.
+
+For fixed-path downloads, `DocumentSnapshotCache::readPublished($snapshot)`
+checks ordering and the published fingerprint and reads the bytes under the
+publication lock. It returns `null` when the snapshot is superseded or its
+publication is missing, and propagates storage read errors. Serve the returned
+bytes directly instead of redirecting to a path another publisher can replace.
+
 The immutable ID survives serialization and is copied into `GeneratedDocument`.
 Generation, job creation from existing snapshots, publication, and retries do
 not register the snapshot again. Under the same target lock, publication checks
@@ -512,6 +536,25 @@ Schedule::command('laravel-versioned-storage:cleanup')->everyMinute();
 `dispatchCoalesced()` returns `false` if that rendered snapshot was already
 superseded before it could be recorded, or `true` when it was accepted.
 Dispatch errors throw even though the recorded request remains recoverable.
+
+For optional target feedback, publish and run the target-events migration on the
+coalescing connection, then enable `coalescing.record_target_events` in every
+worker and scheduler. `Documents::targetEventCursor($target)` returns the
+current cursor; `Documents::targetEvents($target, $cursor)` returns later
+events in order. `AttemptFailed` records an exception observed by a coalesced
+job while its target remains pending. `RecoveryDelayed` records recovery of an
+expired lease, which can reflect queue delay or a still-running worker, not
+proof of failure. Neither represents a terminal target state.
+
+Events are retained until the application removes them; do not prune events
+while subscribers still need them. A terminated worker cannot record its own
+death, and a database outage can prevent recording an observed failure. A
+recording error is reported without replacing the original job exception.
+If recording a recovery event fails, the error is reported and recovery retries
+the reservation without that event; failures to reserve or dispatch work still
+surface. Recovery can later record uncertainty after the database is available.
+Event history and notifications are not exactly-once. Applications must authorize
+access to each target before reading its state or history.
 
 Dispatch accepts only a `RenderedDocument`. Rendering registers its ordering
 marker and pending snapshot together in one database transaction. If the caller
@@ -597,6 +640,18 @@ synchronous publication or reuse reports `Published` without a worker.
 `Published` means the latest fingerprint was published, not that the physical
 file has been checked at query time. This state is shared by all requests for
 that target, not attached to any individual job or requester.
+
+For background freshness checks, `DocumentCoalescer::captureIfUnchanged($target,
+$load)` observes the target before invoking the document-loading closure. It
+returns `null` if another snapshot was registered or the target was retired
+before capture completes. Load fresh source data inside the closure. A matching
+file published before the target is locked is reused without creating pending
+work; otherwise the returned snapshot is durable pending work and can be
+dispatched or recovered. Checking a matching file holds the target and versioned
+storage locks until the filesystem existence check completes.
+`publishedVersion($snapshot)` and `isCurrent($snapshot)` inspect the target without
+clearing pending work. Recheck after reading a version: these observations do
+not reserve it or prevent subsequent publication or retirement.
 
 Versioned writes are staged outside a transaction. The target's latest snapshot
 check, current-version switch, and fingerprint update commit together on the

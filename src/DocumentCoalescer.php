@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace SkyRaptor\LaravelDocuments;
 
+use ArrayObject;
+use Closure;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Carbon;
@@ -13,6 +15,7 @@ use Illuminate\Support\Str;
 use InvalidArgumentException;
 use LogicException;
 use RuntimeException;
+use SkyRaptor\LaravelDocuments\Documents\Document;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateCoalescedDocument;
 use SkyRaptor\LaravelDocuments\Storage\Contracts\DocumentStorage;
 use SkyRaptor\LaravelDocuments\Storage\DocumentStorageManager;
@@ -32,6 +35,127 @@ final class DocumentCoalescer
         private readonly CoalescedSnapshotCodec $codec,
         private readonly CoalescedStageRecovery $stages,
     ) {}
+
+    /**
+     * Load and render only after observing the current target revision. If another
+     * request registers a revision in the meantime, leave that revision untouched.
+     *
+     * @param  Closure(): Document  $load
+     */
+    public function captureIfUnchanged(DocumentTarget $target, Closure $load): ?RenderedDocument
+    {
+        $this->assertEnabled();
+        $this->assertTarget($target);
+        $connection = $this->connection();
+        $this->assertOutsideTransaction($connection);
+        $key = $this->key($target);
+        $observed = $connection->table('document_coalescing_targets')->useWritePdo()->where('target_key', $key)->first();
+
+        if ($observed?->tombstoned) {
+            return null;
+        }
+
+        $document = $load();
+        $actual = $document->target();
+
+        if ($actual->storage !== $target->storage || $actual->context->identity() !== $target->context->identity()) {
+            throw new LogicException('The loaded document must have the observed target.');
+        }
+
+        if (($document->latestSnapshotWins() ?? config('laravel-documents.latest_snapshot_wins', false)) !== true) {
+            throw new LogicException('Conditional capture requires latest snapshot ordering.');
+        }
+
+        $html = $document->html();
+        $driver = $document->pdfDriver();
+        $metadata = $document->metadata();
+        $generator = $document->generator();
+        $fingerprint = RenderedDocument::fingerprintFor($html, $target, $driver, $metadata, $generator);
+
+        return MetadataTransaction::run($connection, function () use ($connection, $key, $observed, $target, $html, $driver, $metadata, $generator, $fingerprint): ?RenderedDocument {
+            $row = $this->lockTarget($connection, $key);
+
+            if ($row->tombstoned || $row->latest_snapshot !== $observed?->latest_snapshot) {
+                return null;
+            }
+
+            $snapshot = $row->latest_fingerprint === $fingerprint && is_string($row->latest_snapshot)
+                ? $row->latest_snapshot
+                : (string) Str::uuid();
+            $rendered = new RenderedDocument($html, $target, $driver, latestSnapshotWins: true, registeredSnapshotId: $snapshot, metadata: $metadata, generator: $generator);
+
+            if ($row->latest_snapshot === $snapshot
+                && ($row->pending !== null || (
+                    is_string($row->published_version)
+                    && $row->published_fingerprint === $fingerprint
+                    && $this->storage->resolve($target->storage)->exists($target->context, $row->published_version)
+                ))) {
+                return $rendered;
+            }
+
+            $connection->table('document_coalescing_targets')->where('target_key', $key)->update([
+                'latest_snapshot' => $snapshot,
+                'latest_fingerprint' => $fingerprint,
+                'pending' => $this->codec->encode($rendered),
+                'worker_token' => $row->worker_token ?? (string) Str::uuid(),
+                'lease_until' => $row->worker_token === null ? null : $row->lease_until,
+                'queue_connection' => $row->worker_token === null ? null : $row->queue_connection,
+                'queue_name' => $row->worker_token === null ? null : $row->queue_name,
+            ]);
+
+            return $rendered;
+        }, 5);
+    }
+
+    public function publishedVersion(RenderedDocument $rendered): ?string
+    {
+        $this->assertEnabled();
+        $this->assertTarget($rendered->target);
+
+        if ($rendered->snapshotId === null) {
+            throw new LogicException('Publication inspection requires an ordered rendered snapshot.');
+        }
+
+        $connection = $this->connection();
+        $this->assertOutsideTransaction($connection);
+        $key = $this->key($rendered->target);
+        $row = $connection->table('document_coalescing_targets')->useWritePdo()->where('target_key', $key)->first();
+
+        if ($row === null || $row->tombstoned || $row->latest_snapshot !== $rendered->snapshotId
+            || $row->latest_fingerprint !== $rendered->fingerprint()
+            || $row->published_fingerprint !== $rendered->fingerprint() || ! is_string($row->published_version)) {
+            return null;
+        }
+
+        $version = $row->published_version;
+
+        if (! $this->storage->resolve($rendered->target->storage)->exists($rendered->target->context, $version)) {
+            return null;
+        }
+        $current = $connection->table('document_coalescing_targets')->useWritePdo()->where('target_key', $key)->first();
+
+        return $current !== null && ! $current->tombstoned && $current->latest_snapshot === $rendered->snapshotId
+            && $current->latest_fingerprint === $rendered->fingerprint()
+            && $current->published_fingerprint === $rendered->fingerprint() && $current->published_version === $version
+                ? $version
+                : null;
+    }
+
+    public function isCurrent(RenderedDocument $rendered): bool
+    {
+        $this->assertEnabled();
+        $this->assertTarget($rendered->target);
+
+        if ($rendered->snapshotId === null) {
+            throw new LogicException('Current revision inspection requires an ordered rendered snapshot.');
+        }
+
+        $row = $this->connection()->table('document_coalescing_targets')->useWritePdo()
+            ->where('target_key', $this->key($rendered->target))->first();
+
+        return $row !== null && ! $row->tombstoned && $row->latest_snapshot === $rendered->snapshotId
+            && $row->latest_fingerprint === $rendered->fingerprint();
+    }
 
     /** @param class-string<DocumentGenerator> $generator */
     public function capture(string $html, DocumentTarget $target, string $driver, ?DocumentMetadata $metadata = null, string $generator = DocumentGenerator::class): string
@@ -104,6 +228,65 @@ final class DocumentCoalescer
         }
 
         return DocumentTargetStatus::NotScheduled;
+    }
+
+    /** @return list<DocumentTargetEvent> */
+    public function targetEvents(DocumentTarget $target, int $after = 0): array
+    {
+        $this->assertEnabled();
+        $this->assertTarget($target);
+
+        if ($after < 0) {
+            throw new InvalidArgumentException('A target event cursor cannot be negative.');
+        }
+
+        if (config('laravel-documents.coalescing.record_target_events') !== true) {
+            throw new LogicException('Document target event recording is disabled.');
+        }
+
+        return array_values($this->connection()->table('document_target_events')->useWritePdo()
+            ->where('target_key', $this->key($target))->where('id', '>', $after)
+            ->orderBy('id')->get()->map(fn (stdClass $row): DocumentTargetEvent => new DocumentTargetEvent(
+                (int) $row->id,
+                DocumentTargetEventType::from($row->type),
+            ))->all());
+    }
+
+    public function targetEventCursor(DocumentTarget $target): int
+    {
+        $this->assertEnabled();
+        $this->assertTarget($target);
+
+        if (config('laravel-documents.coalescing.record_target_events') !== true) {
+            throw new LogicException('Document target event recording is disabled.');
+        }
+
+        return (int) $this->connection()->table('document_target_events')->useWritePdo()
+            ->where('target_key', $this->key($target))->max('id');
+    }
+
+    public function recordFailedAttempt(string $key, string $token): void
+    {
+        if (config('laravel-documents.coalescing.record_target_events') !== true) {
+            return;
+        }
+        $connection = $this->connection();
+        MetadataTransaction::run($connection, function () use ($connection, $key, $token): void {
+            $row = $this->lockTarget($connection, $key);
+
+            if ($row->worker_token === $token && $row->pending !== null && ! $row->tombstoned) {
+                $this->recordTargetEvent($connection, $key, DocumentTargetEventType::AttemptFailed);
+            }
+        }, 5);
+    }
+
+    private function recordTargetEvent(Connection $connection, string $key, DocumentTargetEventType $type): void
+    {
+        $connection->table('document_target_events')->insert([
+            'target_key' => $key,
+            'type' => $type->value,
+            'created_at' => now(),
+        ]);
     }
 
     public function existingPublication(RenderedDocument $rendered): ?DocumentPublicationResult
@@ -432,22 +615,19 @@ final class DocumentCoalescer
         $failure = null;
         foreach ($keys as $key) {
             try {
-                $wake = MetadataTransaction::run($connection, function () use ($connection, $key): ?array {
-                    $row = $this->lockTarget($connection, $key);
+                /** @var ArrayObject<int, Throwable> $eventFailures */
+                $eventFailures = new ArrayObject;
 
-                    if ($row->pending === null || ($row->lease_until !== null && $row->lease_until > now()->toDateTimeString())) {
-                        return null;
+                try {
+                    $wake = $this->reserveRecoveryWakeup($connection, $key, true, $eventFailures);
+                } catch (Throwable $exception) {
+                    if (! isset($eventFailures[0]) || $exception !== $eventFailures[0]) {
+                        throw $exception;
                     }
 
-                    if (! is_string($row->worker_token) || $row->worker_token === '') {
-                        throw new RuntimeException('Pending coalesced work is missing its worker token.');
-                    }
-                    $token = $row->worker_token;
-                    $connection->table('document_coalescing_targets')->where('target_key', $key)
-                        ->update(['worker_token' => $token, 'lease_until' => $this->leaseUntil()]);
-
-                    return [$token, $row->queue_connection, $row->queue_name];
-                }, 5);
+                    report($exception);
+                    $wake = $this->reserveRecoveryWakeup($connection, $key, false, $eventFailures);
+                }
 
                 if ($wake !== null) {
                     $this->wake($key, $wake[0], $wake[1], $wake[2]);
@@ -466,6 +646,41 @@ final class DocumentCoalescer
         if ($failure !== null) {
             throw $failure;
         }
+    }
+
+    /**
+     * @param  ArrayObject<int, Throwable>  $eventFailures
+     * @return array{string, ?string, ?string}|null
+     */
+    private function reserveRecoveryWakeup(Connection $connection, string $key, bool $recordEvents, ArrayObject $eventFailures): ?array
+    {
+        return MetadataTransaction::run($connection, function () use ($connection, $key, $recordEvents, $eventFailures): ?array {
+            $row = $this->lockTarget($connection, $key);
+
+            if ($row->pending === null || ($row->lease_until !== null && $row->lease_until > now()->toDateTimeString())) {
+                return null;
+            }
+
+            if (! is_string($row->worker_token) || $row->worker_token === '') {
+                throw new RuntimeException('Pending coalesced work is missing its worker token.');
+            }
+
+            if ($recordEvents && $row->lease_until !== null && config('laravel-documents.coalescing.record_target_events') === true) {
+                try {
+                    $this->recordTargetEvent($connection, $key, DocumentTargetEventType::RecoveryDelayed);
+                } catch (Throwable $exception) {
+                    $eventFailures[0] = $exception;
+
+                    throw $exception;
+                }
+            }
+
+            $token = $row->worker_token;
+            $connection->table('document_coalescing_targets')->where('target_key', $key)
+                ->update(['worker_token' => $token, 'lease_until' => $this->leaseUntil()]);
+
+            return [$token, $row->queue_connection, $row->queue_name];
+        }, 5);
     }
 
     private function recordRecoveryFailure(?Throwable $first, Throwable $exception): Throwable

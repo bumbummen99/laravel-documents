@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use SkyRaptor\LaravelDocuments\DocumentCoalescer;
@@ -18,9 +19,11 @@ use SkyRaptor\LaravelDocuments\DocumentGenerator;
 use SkyRaptor\LaravelDocuments\DocumentPublicationStatus;
 use SkyRaptor\LaravelDocuments\Documents\Document;
 use SkyRaptor\LaravelDocuments\DocumentTarget;
+use SkyRaptor\LaravelDocuments\DocumentTargetEventType;
 use SkyRaptor\LaravelDocuments\DocumentTargetStatus;
 use SkyRaptor\LaravelDocuments\Facades\Documents;
 use SkyRaptor\LaravelDocuments\GeneratedDocument;
+use SkyRaptor\LaravelDocuments\Jobs\GenerateCoalescedDocument;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateVersionedDocument;
 use SkyRaptor\LaravelDocuments\RenderedDocument;
 use SkyRaptor\LaravelDocuments\Storage\Contexts\DocumentStorageContext;
@@ -46,6 +49,105 @@ beforeEach(function () {
     $this->app->forgetInstance('encrypter');
     Crypt::clearResolvedInstance('encrypter');
     Storage::fake('documents');
+});
+
+it('records failed attempts and uncertain lease recovery separately from pending target state', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        (require dirname(__DIR__, 2).'/database/migrations/2026_11_28_000000_create_document_target_events_table.php')->up();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('laravel-documents.coalescing.record_target_events', true);
+        Config::set('queue.default', 'database');
+        $target = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/feedback.pdf', 'documents'));
+        $snapshot = new RenderedDocument('pending', $target, latestSnapshotWins: true);
+        Documents::dispatchCoalesced($snapshot);
+        $row = DB::table('document_coalescing_targets')->first();
+        $job = new GenerateCoalescedDocument($row->target_key, $row->worker_token);
+        $this->app->bind(DocumentGenerator::class, fn () => throw new RuntimeException('generator unavailable'));
+
+        expect(fn () => $job->handle(app(DocumentCoalescer::class)))
+            ->toThrow(RuntimeException::class, 'generator unavailable');
+        $events = Documents::targetEvents($target);
+        expect($events)->toHaveCount(1)
+            ->and($events[0]->type)->toBe(DocumentTargetEventType::AttemptFailed)
+            ->and(Documents::targetEventCursor($target))->toBe($events[0]->id)
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+        DB::table('document_coalescing_targets')->update(['lease_until' => now()->subMinute()]);
+        app(DocumentCoalescer::class)->recover();
+        $later = Documents::targetEvents($target, $events[0]->id);
+        expect($later)->toHaveCount(1)
+            ->and($later[0]->type)->toBe(DocumentTargetEventType::RecoveryDelayed)
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+        $other = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/other.pdf', 'documents'));
+        expect(Documents::targetEvents($other))->toBe([])
+            ->and(Documents::targetEventCursor($other))->toBe(0);
+    });
+});
+
+it('reports event recording errors without replacing the original attempt exception', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('laravel-documents.coalescing.record_target_events', true);
+        Config::set('queue.default', 'database');
+        $target = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/event-outage.pdf', 'documents'));
+        Documents::dispatchCoalesced(new RenderedDocument('pending', $target, latestSnapshotWins: true));
+        $row = DB::table('document_coalescing_targets')->first();
+        $job = new GenerateCoalescedDocument($row->target_key, $row->worker_token);
+        $this->app->bind(DocumentGenerator::class, fn () => throw new RuntimeException('generator unavailable'));
+        Exceptions::fake();
+
+        expect(fn () => $job->handle(app(DocumentCoalescer::class)))
+            ->toThrow(RuntimeException::class, 'generator unavailable')
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+        Exceptions::assertReported(QueryException::class);
+    });
+});
+
+it('recovers expired work when recording the recovery event fails', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('laravel-documents.coalescing.record_target_events', true);
+        Config::set('queue.default', 'database');
+        $context = new FilesystemDocumentStorageContext('invoices/recovery-event-outage.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $snapshot = new RenderedDocument('recoverable PDF', $target, latestSnapshotWins: true, generator: HtmlDocumentGenerator::class);
+        Documents::dispatchCoalesced($snapshot);
+        DB::table('jobs')->delete();
+        DB::table('document_coalescing_targets')->update(['lease_until' => now()->subMinute()]);
+        Exceptions::fake();
+
+        app(DocumentCoalescer::class)->recover();
+
+        Exceptions::assertReported(QueryException::class);
+        expect(DB::table('jobs')->count())->toBe(1)
+            ->and(DB::table('document_coalescing_targets')->first()->lease_until)->toBeGreaterThan(now()->toDateTimeString());
+        $this->artisan('queue:work', ['connection' => 'database', '--once' => true])->assertSuccessful();
+        expect((new VersionedDocumentStorage)->get($context))->toBe('recoverable PDF')
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Published);
+    });
+});
+
+it('reports event failure but still surfaces a failed recovery reservation', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('laravel-documents.coalescing.record_target_events', true);
+        Config::set('queue.default', 'database');
+        $target = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/recovery-reservation-outage.pdf', 'documents'));
+        Documents::dispatchCoalesced(new RenderedDocument('pending', $target, latestSnapshotWins: true));
+        DB::table('jobs')->delete();
+        DB::table('document_coalescing_targets')->update(['lease_until' => now()->subMinute()]);
+        DB::unprepared("CREATE TRIGGER reject_recovery_lease BEFORE UPDATE OF lease_until ON document_coalescing_targets BEGIN SELECT RAISE(FAIL, 'reject recovery lease'); END");
+        Exceptions::fake();
+
+        expect(fn () => app(DocumentCoalescer::class)->recover())
+            ->toThrow(QueryException::class, 'reject recovery lease')
+            ->and(DB::table('jobs')->count())->toBe(0)
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+        Exceptions::assertReported(QueryException::class);
+    });
 });
 
 it('rolls back a failed publication commit and leaves its stage recoverable', function () {

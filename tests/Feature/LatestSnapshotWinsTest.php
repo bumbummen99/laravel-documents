@@ -44,6 +44,275 @@ beforeEach(function () {
     app()->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
 });
 
+it('reads only a current published snapshot while holding the publication lock', function () {
+    $snapshot = latestSnapshot('original');
+    $cache = app(DocumentSnapshotCache::class);
+    expect($cache->readPublished($snapshot))->toBeNull();
+    Documents::publishWithResult($snapshot);
+    expect($cache->readPublished($snapshot))->toBe('original');
+
+    $key = 'laravel_documents:snapshot:'.hash('sha256', $snapshot->target->context->identity()).':lock';
+    $lock = Cache::lock($key, 30);
+    $storage = Mockery::mock(DocumentStorage::class);
+    $storage->shouldReceive('exists')->once()->andReturnTrue();
+    $storage->shouldReceive('get')->once()->andReturnUsing(function () use ($lock): string {
+        expect($lock->get())->toBeFalse();
+
+        return 'original';
+    });
+    app(DocumentStorageManager::class)->register('disk', fn () => $storage);
+    expect($cache->readPublished($snapshot))->toBe('original')->and($lock->get())->toBeTrue();
+    $lock->release();
+    latestSnapshot('newer');
+    expect($cache->readPublished($snapshot))->toBeNull();
+});
+
+it('rejects invalid publication reads and surfaces storage failures', function () {
+    $unordered = latestSnapshot('unordered', false);
+    $cache = app(DocumentSnapshotCache::class);
+    expect(fn () => $cache->readPublished($unordered))->toThrow(LogicException::class);
+    $snapshot = latestSnapshot('original');
+    Documents::publishWithResult($snapshot);
+    $storage = Mockery::mock(DocumentStorage::class);
+    $storage->shouldReceive('exists')->once()->andReturnTrue();
+    $storage->shouldReceive('get')->once()->andThrow(new RuntimeException('read failed'));
+    app(DocumentStorageManager::class)->register('disk', fn () => $storage);
+    expect(fn () => $cache->readPublished($snapshot))->toThrow(RuntimeException::class, 'read failed');
+    Config::set('laravel-documents.coalescing.enabled', true);
+    expect(fn () => $cache->readPublished($snapshot))->toThrow(LogicException::class);
+});
+
+it('inspects an ordered cache-backed publication without generating another PDF', function () {
+    $snapshot = latestSnapshot('original');
+    $cache = app(DocumentSnapshotCache::class);
+
+    expect($cache->existingPublicationStatus($snapshot))->toBeNull();
+    Documents::publishWithResult($snapshot);
+    expect($cache->existingPublicationStatus($snapshot))->toBe(DocumentPublicationStatus::Published);
+
+    Storage::disk('documents')->delete('latest.pdf');
+    expect($cache->existingPublicationStatus($snapshot))->toBeNull();
+});
+
+it('does not reuse a cache-backed publication after a newer snapshot is registered', function () {
+    $snapshot = latestSnapshot('original');
+    Documents::publishWithResult($snapshot);
+    latestSnapshot('newer');
+
+    expect(app(DocumentSnapshotCache::class)->existingPublicationStatus($snapshot))
+        ->toBe(DocumentPublicationStatus::Superseded)
+        ->and(Storage::disk('documents')->get('latest.pdf'))->toBe('original');
+});
+
+it('holds the publication lock while inspecting the stored document', function () {
+    $snapshot = latestSnapshot('original');
+    Documents::publishWithResult($snapshot);
+    $key = 'laravel_documents:snapshot:'.hash('sha256', $snapshot->target->context->identity()).':lock';
+    $lock = Cache::lock($key, 30);
+    $storage = Mockery::mock(DocumentStorage::class);
+    $storage->shouldReceive('exists')->once()->andReturnUsing(function () use ($lock): bool {
+        expect($lock->get())->toBeFalse();
+
+        return true;
+    });
+    app(DocumentStorageManager::class)->register('disk', fn () => $storage);
+
+    expect(app(DocumentSnapshotCache::class)->existingPublicationStatus($snapshot))
+        ->toBe(DocumentPublicationStatus::Published)
+        ->and($lock->get())->toBeTrue();
+    $lock->release();
+});
+
+it('rejects a missing latest marker during cache-backed publication inspection', function () {
+    $snapshot = latestSnapshot('original');
+    $key = 'laravel_documents:snapshot:'.hash('sha256', $snapshot->target->context->identity()).':latest';
+    Cache::forget($key);
+
+    expect(fn () => app(DocumentSnapshotCache::class)->existingPublicationStatus($snapshot))
+        ->toThrow(RuntimeException::class, 'The latest document snapshot marker is missing.');
+});
+
+it('requires cache-backed ordered snapshots for publication inspection', function () {
+    $unordered = latestSnapshot('unordered', false);
+    expect(fn () => app(DocumentSnapshotCache::class)->existingPublicationStatus($unordered))
+        ->toThrow(LogicException::class, 'Publication inspection requires an ordered rendered snapshot.');
+
+    Config::set('laravel-documents.coalescing.enabled', true);
+    expect(fn () => app(DocumentSnapshotCache::class)->existingPublicationStatus($unordered))
+        ->toThrow(LogicException::class, 'Coalesced publication inspection must use DocumentCoalescer.');
+});
+
+it('conditionally captures a cache-backed snapshot without replacing a newer revision', function () {
+    $document = new class extends Document
+    {
+        public static ?string $path = 'latest.pdf';
+
+        public static ?string $disk = 'documents';
+
+        public static ?bool $latestSnapshotWins = true;
+
+        public ?Closure $duringHtml = null;
+
+        public function html(): string
+        {
+            ($this->duringHtml)?->__invoke();
+
+            return 'older';
+        }
+    };
+    $older = $document->render();
+    $newer = null;
+    $document->duringHtml = function () use ($document, &$newer): void {
+        $newer = new RenderedDocument('newer', $document->target(), latestSnapshotWins: true);
+    };
+
+    $captured = app(DocumentSnapshotCache::class)->captureIfUnchanged($document->target(), fn () => $document);
+
+    expect($captured)->toBeNull()
+        ->and(Documents::publishWithResult($older)->status)->toBe(DocumentPublicationStatus::Superseded)
+        ->and(Documents::publishWithResult($newer)->status)->toBe(DocumentPublicationStatus::Published)
+        ->and(Storage::disk('documents')->get('latest.pdf'))->toBe('newer');
+});
+
+it('reuses an equivalent cache-backed snapshot and preserves serialization', function () {
+    $document = new class extends Document
+    {
+        public static ?string $path = 'latest.pdf';
+
+        public static ?string $disk = 'documents';
+
+        public static ?bool $latestSnapshotWins = true;
+
+        public function html(): string
+        {
+            return 'same';
+        }
+    };
+    $previous = $document->render();
+
+    $captured = app(DocumentSnapshotCache::class)->captureIfUnchanged($document->target(), fn () => $document);
+
+    expect($captured)->not->toBeNull()
+        ->and($captured->snapshotId)->toBe($previous->snapshotId)
+        ->and(unserialize(serialize($captured))->fingerprint())->toBe($previous->fingerprint())
+        ->and(Documents::publishWithResult($captured)->status)->toBe(DocumentPublicationStatus::Published);
+});
+
+it('validates the target and ordering policy when conditionally capturing cache-backed snapshots', function () {
+    $document = new class extends Document
+    {
+        public static ?string $path = 'latest.pdf';
+
+        public static ?string $disk = 'documents';
+
+        public function html(): string
+        {
+            return 'same';
+        }
+    };
+    $other = new DocumentTarget('disk', new FilesystemDocumentStorageContext('other.pdf', 'documents'));
+    $cache = app(DocumentSnapshotCache::class);
+
+    expect(fn () => $cache->captureIfUnchanged($other, fn () => $document))
+        ->toThrow(LogicException::class, 'The loaded document must have the observed target.');
+    expect(fn () => $cache->captureIfUnchanged($document->target(), fn () => $document))
+        ->toThrow(LogicException::class, 'Conditional capture requires latest snapshot ordering.');
+});
+
+it('reports a cache write failure during conditional capture', function () {
+    $store = new FailingSnapshotCacheStore;
+    app('cache')->extend('failing-conditional', fn () => new Repository($store));
+    Config::set('cache.stores.failing-conditional', ['driver' => 'failing-conditional']);
+    Config::set('laravel-documents.snapshot_cache.store', 'failing-conditional');
+    $store->failWrite = true;
+    $document = new class extends Document
+    {
+        public static ?string $path = 'latest.pdf';
+
+        public static ?string $disk = 'documents';
+
+        public static ?bool $latestSnapshotWins = true;
+
+        public function html(): string
+        {
+            return 'same';
+        }
+    };
+
+    expect(fn () => app(DocumentSnapshotCache::class)->captureIfUnchanged($document->target(), fn () => $document))
+        ->toThrow(RuntimeException::class, 'Failed to register the latest document snapshot.');
+});
+
+it('honours package-wide ordering and registers an initial conditional capture', function () {
+    Config::set('laravel-documents.latest_snapshot_wins', true);
+    $document = new class extends Document
+    {
+        public static ?string $path = 'latest.pdf';
+
+        public static ?string $disk = 'documents';
+
+        public function html(): string
+        {
+            return 'initial';
+        }
+    };
+
+    $captured = app(DocumentSnapshotCache::class)->captureIfUnchanged($document->target(), fn () => $document);
+
+    expect($captured)->not->toBeNull()
+        ->and(Documents::publishWithResult($captured)->status)->toBe(DocumentPublicationStatus::Published)
+        ->and(Storage::disk('documents')->get('latest.pdf'))->toBe('initial');
+});
+
+it('rejects invalid conditional input without superseding an existing snapshot', function () {
+    $document = new class extends Document
+    {
+        public static ?string $path = 'latest.pdf';
+
+        public static ?string $disk = 'documents';
+
+        public static ?bool $latestSnapshotWins = true;
+
+        public string $driver = 'default';
+
+        public string $generatorClass = DocumentGenerator::class;
+
+        public function html(): string
+        {
+            return 'same';
+        }
+
+        public function pdfDriver(): string
+        {
+            return $this->driver;
+        }
+
+        public function generator(): string
+        {
+            return $this->generatorClass;
+        }
+    };
+    $original = $document->render();
+    $cache = app(DocumentSnapshotCache::class);
+    $document->driver = '';
+
+    expect(fn () => $cache->captureIfUnchanged($document->target(), fn () => $document))
+        ->toThrow(InvalidArgumentException::class, 'The document PDF driver configuration cannot be empty.');
+    $document->driver = 'default';
+    $document->generatorClass = stdClass::class;
+    expect(fn () => $cache->captureIfUnchanged($document->target(), fn () => $document))
+        ->toThrow(InvalidArgumentException::class, 'The document generator must extend');
+    expect(Documents::publishWithResult($original)->status)->toBe(DocumentPublicationStatus::Published);
+});
+
+it('rejects cache-backed conditional capture when coalescing is enabled', function () {
+    Config::set('laravel-documents.coalescing.enabled', true);
+    $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('latest.pdf', 'documents'));
+
+    expect(fn () => app(DocumentSnapshotCache::class)->captureIfUnchanged($target, fn () => throw new RuntimeException('Unexpected load')))
+        ->toThrow(LogicException::class, 'Coalesced conditional capture must use DocumentCoalescer.');
+});
+
 it('prevents a serialized queued snapshot from overwriting a newer HTTP publication', function () {
     $older = latestSnapshot('queued');
     $job = new GenerateUniqueDocument($older);
