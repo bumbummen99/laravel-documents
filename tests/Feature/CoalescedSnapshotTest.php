@@ -21,7 +21,9 @@ use SkyRaptor\LaravelDocuments\Events\DocumentStored;
 use SkyRaptor\LaravelDocuments\Facades\Documents;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateVersionedDocument;
 use SkyRaptor\LaravelDocuments\RenderedDocument;
+use SkyRaptor\LaravelDocuments\Storage\Contexts\DocumentStorageContext;
 use SkyRaptor\LaravelDocuments\Storage\Contexts\FilesystemDocumentStorageContext;
+use SkyRaptor\LaravelDocuments\Storage\DocumentStorageManager;
 use SkyRaptor\LaravelDocuments\Storage\VersionedDocumentStorage;
 use SkyRaptor\LaravelDocuments\Tests\Fixtures\FakeDocumentGenerator;
 use SkyRaptor\LaravelDocuments\Tests\Fixtures\HtmlDocumentGenerator;
@@ -167,6 +169,130 @@ it('inspects an unchanged publication without registering pending work', functio
         new RenderedDocument('new', $document->target(), latestSnapshotWins: true);
         expect($coalescer->publishedVersion($captured))->toBeNull()
             ->and($coalescer->isCurrent($captured))->toBeFalse();
+    });
+});
+
+it('reuses a matching snapshot published while the document is loading', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $document = new class extends Document
+        {
+            public static string $storage = 'versioned';
+
+            public static ?string $path = 'invoices/inspection-publication-race.pdf';
+
+            public static ?string $disk = 'documents';
+
+            public static ?bool $latestSnapshotWins = true;
+
+            public function html(): string
+            {
+                return 'same';
+            }
+
+            public function generator(): string
+            {
+                return HtmlDocumentGenerator::class;
+            }
+        };
+        $snapshot = $document->render();
+        $coalescer = app(DocumentCoalescer::class);
+        $version = null;
+
+        $captured = $coalescer->captureIfUnchanged($document->target(), function () use ($snapshot, $document, &$version) {
+            $version = Documents::publishWithResult($snapshot)->version;
+
+            return $document;
+        });
+
+        expect($captured)->not->toBeNull()
+            ->and($captured->snapshotId)->toBe($snapshot->snapshotId)
+            ->and($coalescer->publishedVersion($captured))->toBe($version)
+            ->and(Documents::targetStatus($document->target()))->toBe(DocumentTargetStatus::Published)
+            ->and(DB::table('document_coalescing_targets')->first()->pending)->toBeNull();
+    });
+});
+
+it('registers pending work when a matching publication becomes missing while the document is loading', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $document = new class extends Document
+        {
+            public static string $storage = 'versioned';
+
+            public static ?string $path = 'invoices/inspection-missing-race.pdf';
+
+            public static ?string $disk = 'documents';
+
+            public static ?bool $latestSnapshotWins = true;
+
+            public function html(): string
+            {
+                return 'same';
+            }
+
+            public function generator(): string
+            {
+                return HtmlDocumentGenerator::class;
+            }
+        };
+        $snapshot = $document->render();
+        $coalescer = app(DocumentCoalescer::class);
+
+        $captured = $coalescer->captureIfUnchanged($document->target(), function () use ($snapshot, $document) {
+            $version = Documents::publishWithResult($snapshot)->version;
+            Storage::disk('documents')->delete("invoices/inspection-missing-race.pdf/{$version}/document.pdf");
+
+            return $document;
+        });
+
+        expect($captured)->not->toBeNull()
+            ->and($captured->snapshotId)->toBe($snapshot->snapshotId)
+            ->and($coalescer->publishedVersion($captured))->toBeNull()
+            ->and(Documents::targetStatus($document->target()))->toBe(DocumentTargetStatus::Pending);
+    });
+});
+
+it('propagates publication inspection failures without creating pending work', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $document = new class extends Document
+        {
+            public static string $storage = 'versioned';
+
+            public static ?string $path = 'invoices/inspection-error.pdf';
+
+            public static ?string $disk = 'documents';
+
+            public static ?bool $latestSnapshotWins = true;
+
+            public function html(): string
+            {
+                return 'same';
+            }
+
+            public function generator(): string
+            {
+                return HtmlDocumentGenerator::class;
+            }
+        };
+        Documents::publishIfChanged($document);
+        $storage = new class extends VersionedDocumentStorage
+        {
+            public function exists(DocumentStorageContext $context, ?string $version = null): bool
+            {
+                throw new RuntimeException('Storage unavailable');
+            }
+        };
+        app(DocumentStorageManager::class)->register('versioned', fn () => $storage, GenerateVersionedDocument::class);
+
+        expect(fn () => app(DocumentCoalescer::class)->captureIfUnchanged($document->target(), fn () => $document))
+            ->toThrow(RuntimeException::class, 'Storage unavailable')
+            ->and(DB::table('document_coalescing_targets')->first()->pending)->toBeNull()
+            ->and(Documents::targetStatus($document->target()))->toBe(DocumentTargetStatus::Published);
     });
 });
 

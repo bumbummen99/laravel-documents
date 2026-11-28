@@ -620,9 +620,11 @@ that target, not attached to any individual job or requester.
 For background freshness checks, `DocumentCoalescer::captureIfUnchanged($target,
 $load)` observes the target before invoking the document-loading closure. It
 returns `null` if another snapshot was registered or the target was retired
-before capture completes. Load fresh source data inside the closure. An already
-published, unchanged file is reused without creating pending work; otherwise the
-returned snapshot is durable pending work and can be dispatched or recovered.
+before capture completes. Load fresh source data inside the closure. A matching
+file published before the target is locked is reused without creating pending
+work; otherwise the returned snapshot is durable pending work and can be
+dispatched or recovered. Checking a matching file holds the target and versioned
+storage locks until the filesystem existence check completes.
 `publishedVersion($snapshot)` and `isCurrent($snapshot)` inspect the target without
 clearing pending work. Recheck after reading a version: these observations do
 not reserve it or prevent subsequent publication or retirement.

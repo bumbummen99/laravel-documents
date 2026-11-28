@@ -71,13 +71,8 @@ final class DocumentCoalescer
         $metadata = $document->metadata();
         $generator = $document->generator();
         $fingerprint = RenderedDocument::fingerprintFor($html, $target, $driver, $metadata, $generator);
-        $reusable = is_string($observed?->published_version)
-            && $observed->published_fingerprint === $fingerprint
-            && $this->storage->resolve($target->storage)->exists($target->context, $observed->published_version)
-                ? $observed->published_version
-                : null;
 
-        return MetadataTransaction::run($connection, function () use ($connection, $key, $observed, $target, $html, $driver, $metadata, $generator, $fingerprint, $reusable): ?RenderedDocument {
+        return MetadataTransaction::run($connection, function () use ($connection, $key, $observed, $target, $html, $driver, $metadata, $generator, $fingerprint): ?RenderedDocument {
             $row = $this->lockTarget($connection, $key);
 
             if ($row->tombstoned || $row->latest_snapshot !== $observed?->latest_snapshot) {
@@ -90,7 +85,11 @@ final class DocumentCoalescer
             $rendered = new RenderedDocument($html, $target, $driver, latestSnapshotWins: true, registeredSnapshotId: $snapshot, metadata: $metadata, generator: $generator);
 
             if ($row->latest_snapshot === $snapshot
-                && ($row->pending !== null || ($reusable !== null && $row->published_version === $reusable && $row->published_fingerprint === $fingerprint))) {
+                && ($row->pending !== null || (
+                    is_string($row->published_version)
+                    && $row->published_fingerprint === $fingerprint
+                    && $this->storage->resolve($target->storage)->exists($target->context, $row->published_version)
+                ))) {
                 return $rendered;
             }
 
