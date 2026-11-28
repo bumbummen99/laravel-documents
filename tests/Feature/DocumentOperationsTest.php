@@ -19,9 +19,15 @@ use SkyRaptor\LaravelDocuments\Pdf\DocumentPdfDriverManager;
 use SkyRaptor\LaravelDocuments\RenderedDocument;
 use SkyRaptor\LaravelDocuments\Storage\Contexts\FilesystemDocumentStorageContext;
 use SkyRaptor\LaravelDocuments\Tests\Fixtures\ConfiguredPdfDriver;
+use SkyRaptor\LaravelDocuments\Tests\Fixtures\FailingDocumentGenerator;
 
 beforeEach(function () {
     Storage::fake('documents');
+});
+
+it('keeps generation final while allowing custom PDF content generation', function () {
+    expect((new ReflectionMethod(DocumentGenerator::class, 'generate'))->isFinal())->toBeTrue()
+        ->and((new ReflectionMethod(DocumentGenerator::class, 'generateContents'))->isFinal())->toBeFalse();
 });
 
 it('reuses the generator for independent snapshots without publication or queue dependencies', function () {
@@ -48,9 +54,7 @@ it('publishes the supplied generation result without a generator and updates its
         'disk',
         new FilesystemDocumentStorageContext('invoice.pdf', 'documents'),
     ));
-    $generator = Mockery::mock(DocumentGenerator::class);
-    $generator->shouldNotReceive('generate');
-    app()->instance(DocumentGenerator::class, $generator);
+    app()->bind(DocumentGenerator::class, FailingDocumentGenerator::class);
 
     $generated = new GeneratedDocument($rendered, 'final PDF', 'generation-123');
 
@@ -62,9 +66,7 @@ it('publishes the supplied generation result without a generator and updates its
 
 it('constructs jobs without generating or dispatching a document', function () {
     Queue::fake();
-    $generator = Mockery::mock(DocumentGenerator::class);
-    $generator->shouldNotReceive('generate');
-    app()->instance(DocumentGenerator::class, $generator);
+    app()->bind(DocumentGenerator::class, FailingDocumentGenerator::class);
     $rendered = new RenderedDocument('frozen', new DocumentTarget(
         'versioned',
         new FilesystemDocumentStorageContext('invoice.pdf', 'documents'),

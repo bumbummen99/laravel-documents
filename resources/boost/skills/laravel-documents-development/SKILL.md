@@ -42,6 +42,10 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   to skip rendering and generated input for publication to skip generation too.
   The low-level `DocumentGenerator` accepts only `RenderedDocument` and returns
   `GeneratedDocument`; `DocumentPublisher` accepts only `GeneratedDocument`.
+- Override `Document::metadata()` to return immutable `DocumentMetadata` with
+  title, author, subject, keywords, creator, and creation date. It is captured
+  with HTML, affects the fingerprint, and replaces builder metadata. A null
+  result leaves builder metadata intact but does not freeze or fingerprint it.
 - Use `Documents::publishWithResult()` (or the publisher's method for generated
   input) to distinguish `DocumentPublicationStatus::Published` from
   `Superseded`. The result's `version` may be null even when published; failures
@@ -65,7 +69,7 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   Lock-release failures are reported without failing completed writes or masking
   original storage exceptions. Comparison and dispatch are not atomic.
 - Publish `laravel-documents-config` to customize cache settings. The base
-  package has no migrations.
+  package has no migrations unless optional coalescing is enabled.
 - To prevent old queued snapshots from overwriting newer HTTP publications,
   set `public static ?bool $latestSnapshotWins = true` on the document or
   `laravel-documents.latest_snapshot_wins` globally. Null inherits; false opts
@@ -79,6 +83,54 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   Missing cache markers fail explicitly; render a fresh snapshot to recover.
   Opt in consistently across HTTP and workers; untracked legacy/opted-out
   snapshots retain publication-order behavior.
+- For recoverable coalesced queued generation, install Versioned Storage
+  0.2.0-beta.1 or a compatible release and run its migrations, publish
+  `laravel-documents-migrations`, and migrate on the same connection. Enable
+  `laravel-documents.coalescing.enabled` and `latest_snapshot_wins`, and use
+  versioned storage for all snapshots. Call `Documents::dispatchCoalesced($document->render(),
+  connection: 'redis', queue: 'pdf')`; unlike `makeJob()`, this dispatches.
+  Schedule `documents:recover` and `laravel-versioned-storage:cleanup`, and run
+  queue workers. The latter reclaims interrupted uploads that were not yet in
+  the document stage journal. Avoid coalescing operations inside transactions.
+- Dispatch only a `RenderedDocument`. Rendering atomically registers its
+  marker and recoverable pending snapshot, even for synchronous generation.
+  Set a custom generator on `Document::generator()` or the snapshot constructor
+  before rendering. Only its class-name string is captured and fingerprinted;
+  workers and direct generator calls resolve the instance from the container.
+  Jobs always use the captured generator. Call `DocumentGenerator::generate($snapshot)` statically to
+  avoid resolving an unused instance before generation.
+  Recovery can queue it without explicit dispatch, using the default queue if
+  none was selected. Use `$document->html()` for HTML-only previews and secure
+  the application route. Concurrent synchronous and queued generation can
+  produce duplicates. The first matching PDF publication wins; subsequent
+  attempts reuse its version without a stored event, even if bytes differ. A
+  missing PDF is regenerated. Successful publication or synchronous reuse clears
+  matching pending work, not newer snapshots. Recovery attempts other targets
+  and stages after individual failures, then rethrows the first error.
+- `Documents::tombstoneTarget($target)` fences existing snapshots and rejects
+  registrations until `Documents::restoreTarget($target)`. Both can participate
+  in a Laravel-managed transaction on the shared metadata connection. Neither
+  deletes PDFs. `Documents::invalidate($target)` fences existing snapshots
+  without blocking new registrations and does not clear a tombstone.
+- `Documents::publishIfChanged($document)` reuses a matching existing version
+  or publishes synchronously; it requires coalescing, ordered snapshots, and no
+  active transaction. `Documents::targetStatus($target)` reports shared
+  `NotScheduled`, `Pending`, `Published`, or `Tombstoned` state. Pending
+  includes failed attempts awaiting recovery; Published does not check the file.
+- Pending snapshots use Laravel application-key encryption; legacy plaintext
+  remains readable. Share the key across processes, retain previous keys while
+  pending work needs them, and protect older backups and other plaintext copies.
+  Older versions cannot read encrypted rows: pause rendering, workers and
+  recovery during upgrade and restart all processes before resuming.
+  Encryption does not cover metadata or PDFs. Target ordering records must remain while
+  old snapshots or jobs may exist. Set the recovery lease and stage-retention
+  duration above expected work durations; recovery and queue retries are at
+  least once, and slow stages can be reclaimed and need retrying. Monitor errors.
+  Progress tracking and batches are not provided for coalesced jobs.
+- Both synchronous and coalesced publication use staged versioned writes and a
+  shared database ordering check. Do not mix older workers, cache-only writers,
+  direct storage writes, or different connections: these bypass its guarantee.
+  Run the scheduler and follow Versioned Storage's upload/cleanup limitations.
 
 ### 3. Configure integrations
 
@@ -109,9 +161,9 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   and events using `generationId`, or jobs using `generationId()`. Listener
   exceptions are reported and do not change the stored result.
 - Custom generators extend `DocumentGenerator` and override
-  `protected generateContents(RenderedDocument $rendered): string`; choose one
-  on a job with `withGenerator()`. Generation IDs belong to generated results,
-  not mutable service state.
+  `protected generateContents(RenderedDocument $rendered): string`; `generate()`
+  is final. Choose one on the document or snapshot before rendering. Generation IDs belong
+  to generated results, not mutable service state.
 - For optional Mateffy progress, install `mateffy/laravel-job-progress` and
   select `GenerateUniqueDocumentWithProgress` or
   `GenerateVersionedDocumentWithProgress` from `Integrations\JobProgress`.

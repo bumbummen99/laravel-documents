@@ -134,8 +134,15 @@ it('supersedes an older result even when the newer snapshot is never generated o
 it('does not allow older work to publish after a newer generation fails', function () {
     $older = latestSnapshot('older');
     $newer = latestSnapshot('newer');
-    $generator = Mockery::mock(DocumentGenerator::class);
-    $generator->shouldReceive('generate')->with($newer, null)->andThrow(new RuntimeException('Generation failed.'));
+    $generator = new class extends DocumentGenerator
+    {
+        public function __construct() {}
+
+        protected function generateContents(RenderedDocument $rendered): string
+        {
+            throw new RuntimeException('Generation failed.');
+        }
+    };
     app()->instance(DocumentGenerator::class, $generator);
     Event::fake([DocumentStored::class, DocumentSuperseded::class]);
 

@@ -24,6 +24,12 @@ use SkyRaptor\LaravelDocuments\Tests\Fixtures\RecordStorageContext;
 it('merges the package configuration', function () {
     expect(config('laravel-documents'))->toBe([
         'latest_snapshot_wins' => false,
+        'coalescing' => [
+            'enabled' => false,
+            'connection' => null,
+            'lease_seconds' => 300,
+            'stage_retention_seconds' => 3600,
+        ],
         'snapshot_cache' => [
             'store' => null,
             'lock_seconds' => 300,
@@ -111,6 +117,14 @@ it('publishes only the package configuration', function () {
         ->and(ServiceProvider::pathsToPublish(LaravelDocumentsServiceProvider::class, 'laravel-documents-config'))->toBe($paths)
         ->and(array_map('realpath', array_keys($paths)))->toBe([realpath(__DIR__.'/../../config/laravel-documents.php')])
         ->and(array_values($paths))->toBe([config_path('laravel-documents.php')]);
+});
+
+it('publishes the coalescing tables migration', function () {
+    $paths = ServiceProvider::pathsToPublish(LaravelDocumentsServiceProvider::class, 'laravel-documents-migrations');
+
+    expect($paths)->toHaveCount(1)
+        ->and(array_map('realpath', array_keys($paths)))->toBe([realpath(__DIR__.'/../../database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')])
+        ->and(array_values($paths))->toBe([database_path('migrations/2026_11_27_105147_create_document_coalescing_tables.php')]);
 });
 
 it('does not register a placeholder command', function () {

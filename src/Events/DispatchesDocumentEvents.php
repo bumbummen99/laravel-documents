@@ -12,7 +12,7 @@ use Throwable;
  */
 trait DispatchesDocumentEvents
 {
-    private function dispatchDocumentEvent(object $event): void
+    private static function dispatchDocumentEvent(object $event): void
     {
         try {
             Event::dispatch($event);

@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Storage;
 use SkyRaptor\LaravelDocuments\DocumentGenerator;
+use SkyRaptor\LaravelDocuments\DocumentPublisher;
 use SkyRaptor\LaravelDocuments\DocumentSnapshotCache;
 use SkyRaptor\LaravelDocuments\DocumentTarget;
 use SkyRaptor\LaravelDocuments\DocumentWorkflow;
@@ -27,7 +28,9 @@ use SkyRaptor\LaravelDocuments\Storage\Contexts\FilesystemDocumentStorageContext
 use SkyRaptor\LaravelDocuments\Storage\Contracts\DocumentStorage;
 use SkyRaptor\LaravelDocuments\Storage\DiskDocumentStorage;
 use SkyRaptor\LaravelDocuments\Storage\DocumentStorageManager;
+use SkyRaptor\LaravelDocuments\Tests\Fixtures\FailingDocumentGenerator;
 use SkyRaptor\LaravelDocuments\Tests\Fixtures\FailingSnapshotCacheStore;
+use SkyRaptor\LaravelDocuments\Tests\Fixtures\FakeDocumentGenerator;
 use SkyRaptor\LaravelDocuments\Tests\Fixtures\HtmlDocumentGenerator;
 
 function cachedSnapshot(string $html, string $storage = 'disk'): RenderedDocument
@@ -48,12 +51,78 @@ beforeEach(function () {
     Config::set('laravel-documents.snapshot_cache.store', 'snapshot-test');
 });
 
+it('preserves the captured generator fingerprint when creating and publishing jobs', function (bool $ordered) {
+    $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/generator-cache.pdf', 'documents'));
+    $snapshot = new RenderedDocument('same', $target, latestSnapshotWins: $ordered, generator: FakeDocumentGenerator::class);
+    $job = app(DocumentJobFactory::class)->makeIfChanged($snapshot);
+
+    expect($job)->not->toBeNull();
+    expect(app(DocumentSnapshotCache::class)->changed($snapshot))->toBeTrue()
+        ->and(Storage::disk('documents')->exists('invoices/generator-cache.pdf'))->toBeFalse();
+
+    $job->handle();
+
+    expect(Storage::disk('documents')->get('invoices/generator-cache.pdf'))->toBe('rendered PDF')
+        ->and(app(DocumentJobFactory::class)->makeIfChanged($snapshot))->toBeNull();
+
+    $different = new RenderedDocument('same', $target, latestSnapshotWins: $ordered, generator: HtmlDocumentGenerator::class);
+    expect(app(DocumentJobFactory::class)->makeIfChanged($different))->not->toBeNull();
+})->with([false, true]);
+
+it('ignores a legacy job generator override outside coalescing', function () {
+    $snapshot = new RenderedDocument('wrong', new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/override.pdf', 'documents')), generator: FakeDocumentGenerator::class);
+    $job = new class($snapshot) extends GenerateVersionedDocument
+    {
+        protected function generator(): DocumentGenerator
+        {
+            return app(HtmlDocumentGenerator::class);
+        }
+    };
+
+    $job->handle();
+
+    expect(app(DocumentSnapshotCache::class)->changed($snapshot))->toBeFalse()
+        ->and(Storage::disk('documents')->get('invoices/override.pdf'))->toBe('rendered PDF');
+});
+
+it('uses the captured container binding on direct generation outside coalescing', function () {
+    app()->bind(FakeDocumentGenerator::class, HtmlDocumentGenerator::class);
+    $snapshot = new RenderedDocument('bound bytes', new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/direct.pdf', 'documents')), generator: FakeDocumentGenerator::class);
+
+    $generated = app(FailingDocumentGenerator::class)->generate($snapshot);
+    app(DocumentPublisher::class)->publish($generated);
+
+    expect($generated->contents)->toBe('bound bytes')
+        ->and(Storage::disk('documents')->get('invoices/direct.pdf'))->toBe('bound bytes')
+        ->and(app(DocumentSnapshotCache::class)->changed($snapshot))->toBeFalse();
+});
+
+it('uses the captured generator despite an unrelated job generator field', function () {
+    $snapshot = new RenderedDocument('wrong', new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/changed-generator.pdf', 'documents')), generator: FakeDocumentGenerator::class);
+    $job = new class($snapshot) extends GenerateVersionedDocument
+    {
+        protected string $generatorClass = HtmlDocumentGenerator::class;
+    };
+
+    $job->handle();
+
+    expect(app(DocumentSnapshotCache::class)->changed($snapshot))->toBeFalse()
+        ->and(Storage::disk('documents')->get('invoices/changed-generator.pdf'))->toBe('rendered PDF');
+});
+
 it('retains the last successful snapshot when PDF generation fails before publication', function () {
     $first = cachedSnapshot('first');
     app(DocumentWorkflow::class)->publish($first);
     $failedSnapshot = cachedSnapshot('second');
-    $generator = Mockery::mock(DocumentGenerator::class);
-    $generator->shouldReceive('generate')->once()->with($failedSnapshot, null)->andThrow(new RuntimeException('Generation failed.'));
+    $generator = new class extends DocumentGenerator
+    {
+        public function __construct() {}
+
+        protected function generateContents(RenderedDocument $rendered): string
+        {
+            throw new RuntimeException('Generation failed.');
+        }
+    };
     app()->instance(DocumentGenerator::class, $generator);
 
     expect(fn () => app(DocumentWorkflow::class)->publish($failedSnapshot))->toThrow(RuntimeException::class, 'Generation failed.')
@@ -116,7 +185,7 @@ it('reports a cache write failure after storage without retrying the published j
     app(FailingSnapshotCacheStore::class)->{$failure} = true;
     Exceptions::fake();
     Event::fake([DocumentStored::class, DocumentRenderFailed::class]);
-    $job = (new GenerateVersionedDocument(cachedSnapshot('second')))->withGenerator(HtmlDocumentGenerator::class);
+    $job = new GenerateVersionedDocument(cachedSnapshot('second'));
 
     $job->handle();
 
@@ -181,7 +250,7 @@ it('reports a lock release error after publication without failing the job', fun
     Config::set('laravel-documents.snapshot_cache.store', 'snapshot-release-error');
     Exceptions::fake();
     Event::fake([DocumentStored::class, DocumentRenderFailed::class]);
-    $job = (new GenerateVersionedDocument(cachedSnapshot('stored')))->withGenerator(HtmlDocumentGenerator::class);
+    $job = new GenerateVersionedDocument(cachedSnapshot('stored'));
 
     $job->handle();
 
@@ -215,7 +284,7 @@ it('reports a disk lock release error after writing without failing the job', fu
     Exceptions::fake();
     Event::fake([DocumentStored::class, DocumentRenderFailed::class]);
     $rendered = cachedSnapshot('stored');
-    $job = (new GenerateVersionedDocument($rendered))->withGenerator(HtmlDocumentGenerator::class);
+    $job = new GenerateVersionedDocument($rendered);
 
     $job->handle();
 
@@ -250,7 +319,7 @@ it('reports a false lock release without retrying a stored document or forcing t
         $message = 'Failed to release the disk document write lock.';
     }
 
-    $job = (new GenerateVersionedDocument($rendered))->withGenerator(HtmlDocumentGenerator::class);
+    $job = new GenerateVersionedDocument($rendered);
     $job->handle();
 
     expect($job->generated())->toBeTrue()
@@ -292,7 +361,7 @@ it('preserves the write exception when releasing its lock also fails', function 
         $message = 'Failed to release the disk document write lock.';
     }
 
-    $job = (new GenerateVersionedDocument($rendered))->withGenerator(HtmlDocumentGenerator::class);
+    $job = new GenerateVersionedDocument($rendered);
 
     expect(fn () => $job->handle())->toThrow(RuntimeException::class, 'Original storage failure.')
         ->and($job->generated())->toBeFalse()

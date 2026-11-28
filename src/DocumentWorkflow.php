@@ -15,7 +15,6 @@ use SkyRaptor\LaravelDocuments\Jobs\DocumentJobFactory;
 class DocumentWorkflow
 {
     public function __construct(
-        private readonly DocumentGenerator $generator,
         private readonly DocumentPublisher $publisher,
         private readonly DocumentJobFactory $jobs,
     ) {}
@@ -25,10 +24,9 @@ class DocumentWorkflow
      */
     public function generate(Document|RenderedDocument $document, ?string $generationId = null): GeneratedDocument
     {
-        return $this->generator->generate(
-            $document instanceof Document ? $document->render() : $document,
-            $generationId,
-        );
+        $rendered = $document instanceof Document ? $document->render() : $document;
+
+        return DocumentGenerator::generate($rendered, $generationId);
     }
 
     /**
@@ -45,6 +43,14 @@ class DocumentWorkflow
     public function publishWithResult(Document|RenderedDocument|GeneratedDocument $document, ?string $generationId = null): DocumentPublicationResult
     {
         return $this->publisher->publishWithResult($this->prepareForPublication($document, $generationId));
+    }
+
+    public function publishIfChanged(Document|RenderedDocument $document): DocumentPublicationResult
+    {
+        $rendered = $document instanceof Document ? $document->render() : $document;
+        $existing = app(DocumentCoalescer::class)->existingPublication($rendered);
+
+        return $existing ?? $this->publishWithResult($rendered);
     }
 
     private function prepareForPublication(Document|RenderedDocument|GeneratedDocument $document, ?string $generationId): GeneratedDocument
@@ -88,5 +94,30 @@ class DocumentWorkflow
             $queue,
             $job ?? ($document instanceof Document ? $document->job() : null),
         );
+    }
+
+    public function dispatchCoalesced(RenderedDocument $document, ?string $connection = null, ?string $queue = null): bool
+    {
+        return app(DocumentCoalescer::class)->dispatch($document, $connection, $queue);
+    }
+
+    public function invalidate(DocumentTarget $target): void
+    {
+        app(DocumentCoalescer::class)->invalidate($target);
+    }
+
+    public function targetStatus(DocumentTarget $target): DocumentTargetStatus
+    {
+        return app(DocumentCoalescer::class)->status($target);
+    }
+
+    public function tombstoneTarget(DocumentTarget $target): void
+    {
+        app(DocumentCoalescer::class)->tombstone($target);
+    }
+
+    public function restoreTarget(DocumentTarget $target): void
+    {
+        app(DocumentCoalescer::class)->restore($target);
     }
 }

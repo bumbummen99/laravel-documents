@@ -21,6 +21,7 @@ use SkyRaptor\LaravelDocuments\Jobs\GenerateUniqueDocument;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateVersionedDocument;
 use SkyRaptor\LaravelDocuments\RenderedDocument;
 use SkyRaptor\LaravelDocuments\Storage\Contexts\FilesystemDocumentStorageContext;
+use SkyRaptor\LaravelDocuments\Tests\Fixtures\FailingDocumentGenerator;
 use SkyRaptor\LaravelDocuments\Tests\Fixtures\HtmlDocumentGenerator;
 use SkyRaptor\LaravelDocuments\Tests\Fixtures\InvoiceDocument;
 
@@ -80,12 +81,11 @@ it('passes the generated result to its injected publisher', function () {
     $rendered = workflowSnapshot();
     $document = Mockery::mock(Document::class);
     $document->shouldReceive('render')->once()->andReturn($rendered);
-    $generated = new GeneratedDocument($rendered, 'final PDF', 'generation-123');
-    $generator = Mockery::mock(DocumentGenerator::class);
-    $generator->shouldReceive('generate')->once()->with($rendered, 'generation-123')->andReturn($generated);
-    app()->instance(DocumentGenerator::class, $generator);
     $publisher = Mockery::mock(DocumentPublisher::class);
-    $publisher->shouldReceive('publish')->once()->with($generated)->andReturn('version-123');
+    $publisher->shouldReceive('publish')->once()->withArgs(fn (GeneratedDocument $generated) => $generated->contents === 'Invoice'
+        && $generated->target === $rendered->target
+        && $generated->fingerprint === $rendered->fingerprint()
+        && $generated->generationId === 'generation-123')->andReturn('version-123');
     app()->instance(DocumentPublisher::class, $publisher);
 
     expect(app(DocumentWorkflow::class)->publish($document, generationId: 'generation-123'))->toBe('version-123');
@@ -165,9 +165,7 @@ it('allows applications to mock the workflow through its facade', function () {
 it('propagates snapshot failures without generating PDF bytes', function () {
     $document = Mockery::mock(Document::class);
     $document->shouldReceive('render')->once()->andThrow(new RuntimeException('Cannot render document.'));
-    $generator = Mockery::mock(DocumentGenerator::class);
-    $generator->shouldNotReceive('generate');
-    app()->instance(DocumentGenerator::class, $generator);
+    app()->bind(DocumentGenerator::class, FailingDocumentGenerator::class);
 
     expect(fn () => Documents::generate($document))->toThrow(RuntimeException::class, 'Cannot render document.');
 });

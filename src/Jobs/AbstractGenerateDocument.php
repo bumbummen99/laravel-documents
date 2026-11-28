@@ -9,7 +9,6 @@ use Illuminate\Bus\Queueable;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Support\Str;
-use InvalidArgumentException;
 use SkyRaptor\LaravelDocuments\DocumentGenerator;
 use SkyRaptor\LaravelDocuments\DocumentPublisher;
 use SkyRaptor\LaravelDocuments\Jobs\Contracts\GenerateDocument;
@@ -33,11 +32,6 @@ abstract class AbstractGenerateDocument implements GenerateDocument
     use Dispatchable;
     use InteractsWithQueue;
     use Queueable;
-
-    /**
-     * @var class-string<DocumentGenerator>
-     */
-    protected string $generatorClass = DocumentGenerator::class;
 
     // Keep the legacy field in native payloads for older workers.
     private ?string $generationId = null;
@@ -100,22 +94,6 @@ abstract class AbstractGenerateDocument implements GenerateDocument
         return $this->documentGenerationId ??= $this->generationId ?? $this->job?->uuid() ?? (string) Str::uuid();
     }
 
-    /**
-     * Select the generator class to re-create when the job runs.
-     *
-     * @param  class-string  $generator
-     */
-    public function withGenerator(string $generator): static
-    {
-        if (! is_a($generator, DocumentGenerator::class, true)) {
-            throw new InvalidArgumentException('The generator must extend '.DocumentGenerator::class.'.');
-        }
-
-        $this->generatorClass = $generator;
-
-        return $this;
-    }
-
     public function configureQueue(?string $connection, ?string $queue): static
     {
         if ($connection !== null) {
@@ -136,19 +114,11 @@ abstract class AbstractGenerateDocument implements GenerateDocument
      */
     public function generate(): ?string
     {
-        $generated = $this->generator()->generate($this->rendered, $this->generationId());
+        $generated = DocumentGenerator::generate($this->rendered, $this->generationId());
         $this->version = app(DocumentPublisher::class)->publish($generated);
         $this->generated = true;
 
         return $this->version;
-    }
-
-    /**
-     * Resolve the generator in the worker, including its container dependencies.
-     */
-    protected function generator(): DocumentGenerator
-    {
-        return app($this->generatorClass);
     }
 
     protected function documentBatchCancelled(): bool

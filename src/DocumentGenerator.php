@@ -24,19 +24,21 @@ class DocumentGenerator
     /**
      * Generate once and freeze the final PDF contents and their publication identity.
      */
-    public function generate(RenderedDocument $rendered, ?string $generationId = null): GeneratedDocument
+    final public static function generate(RenderedDocument $rendered, ?string $generationId = null): GeneratedDocument
     {
         if ($generationId === '') {
             throw new InvalidArgumentException('The generation ID cannot be empty.');
         }
 
         $generationId ??= (string) Str::uuid();
-        $this->dispatchDocumentEvent(new DocumentRendering($rendered->target, $generationId));
+        self::dispatchDocumentEvent(new DocumentRendering($rendered->target, $generationId));
 
         try {
-            return new GeneratedDocument($rendered, $this->generateContents($rendered), $generationId);
+            $generator = app($rendered->generatorClass());
+
+            return new GeneratedDocument($rendered, $generator->generateContents($rendered), $generationId);
         } catch (Throwable $exception) {
-            $this->dispatchDocumentEvent(new DocumentRenderFailed(
+            self::dispatchDocumentEvent(new DocumentRenderFailed(
                 target: $rendered->target,
                 generationId: $generationId,
                 exceptionClass: $exception::class,
@@ -52,9 +54,14 @@ class DocumentGenerator
      */
     protected function generateContents(RenderedDocument $rendered): string
     {
-        return $this->drivers
+        $builder = $this->drivers
             ->builder($rendered->driver)
-            ->html($rendered->html)
-            ->generatePdfContent();
+            ->html($rendered->html);
+
+        if (($rendered->metadata ?? null) !== null) {
+            $builder->meta(...$rendered->metadata->toArray());
+        }
+
+        return $builder->generatePdfContent();
     }
 }

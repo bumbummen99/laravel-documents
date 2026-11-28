@@ -24,6 +24,10 @@ final class DocumentSnapshotCache
      */
     public function register(DocumentTarget $target, ?string $fingerprint = null): string
     {
+        if (config('laravel-documents.coalescing.enabled')) {
+            throw new LogicException('Coalesced snapshot registration requires the complete rendered snapshot.');
+        }
+
         return $this->withTargetLock($target, function (Repository $store, string $key) use ($fingerprint): string {
             $latest = $store->get($key.':latest');
 
@@ -51,6 +55,10 @@ final class DocumentSnapshotCache
 
     public function changed(RenderedDocument $rendered): bool
     {
+        if (config('laravel-documents.coalescing.enabled')) {
+            return app(DocumentCoalescer::class)->changed($rendered);
+        }
+
         $store = $this->store();
         $this->lockProvider($store);
 
@@ -66,6 +74,10 @@ final class DocumentSnapshotCache
      */
     public function publish(GeneratedDocument $generated, Closure $write, ?Closure $superseded = null): string|false|null
     {
+        if (config('laravel-documents.coalescing.enabled')) {
+            throw new LogicException('Coalesced publication must use DocumentPublisher and versioned staging.');
+        }
+
         $latestSnapshotId = null;
         $version = $this->withTargetLock($generated->target, function (Repository $store, string $key) use ($generated, $write, &$latestSnapshotId): string|false|null {
             if (($generated->snapshotId ?? null) !== null) {

@@ -33,7 +33,7 @@ php artisan vendor:publish --tag="laravel-documents-config"
 ```
 
 The base package does not require database migrations. Optional versioned
-storage has its own migration setup described below.
+storage and coalesced generation have their own migration setup described below.
 
 ## Usage
 
@@ -124,12 +124,12 @@ Document -> render() -> RenderedDocument
 Use the focused services when coordinating stages explicitly:
 
 ```php
-use SkyRaptor\LaravelDocuments\DocumentPublisher;
 use SkyRaptor\LaravelDocuments\DocumentGenerator;
+use SkyRaptor\LaravelDocuments\DocumentPublisher;
 use SkyRaptor\LaravelDocuments\Jobs\DocumentJobFactory;
 
 $rendered = $document->render();
-$generated = app(DocumentGenerator::class)->generate($rendered);
+$generated = DocumentGenerator::generate($rendered);
 $version = app(DocumentPublisher::class)->publish($generated);
 ```
 
@@ -146,6 +146,13 @@ It does not retain the rendered HTML. `DocumentPublisher` accepts only that
 generated result and coordinates storage, snapshot-cache updates, and publication
 events; it has no generator dependency. `DocumentJobFactory` creates jobs from
 rendered input. No service is serialized into either result or a job.
+In every mode, `DocumentGenerator::generate()` resolves the captured generator
+once from the container. Call it statically rather than resolving a generator
+first; invoking it through an instance does not select that instance.
+
+`GeneratedDocument` accepts caller-supplied bytes. Publication checks its
+snapshot identity, but cannot verify that those bytes were produced from the
+snapshot; only trusted application code should construct one directly.
 
 Use `publishWithResult()` when the caller must distinguish a completed write
 from a superseded attempt:
@@ -173,9 +180,36 @@ An outcome describes that publication attempt, not a guarantee that its target
 remains unchanged afterward. Applications are responsible for deciding how to
 respond and for any availability or freshness checks needed before serving it.
 
-Each workflow invocation renders, generates, and writes at most once. Explicitly
-publishing the same result again can write again, and queue retries can repeat
-generation and publication; this is not an exactly-once queue guarantee.
+Each workflow invocation renders, generates, and writes at most once. Outside
+coalescing, explicitly publishing the same result again can write again, and
+queue retries can repeat generation and publication. Coalescing reuses an
+existing matching PDF when possible, but is not an exactly-once queue guarantee.
+
+### Document metadata
+
+Override `metadata()` to freeze PDF metadata alongside the rendered HTML:
+
+```php
+use SkyRaptor\LaravelDocuments\DocumentMetadata;
+
+public function metadata(): ?DocumentMetadata
+{
+    return new DocumentMetadata(
+        title: 'Invoice '.$this->invoice->number,
+        author: 'Accounts',
+        creationDate: $this->invoice->created_at,
+    );
+}
+```
+
+The immutable metadata supports `title`, `author`, `subject`, `keywords`,
+`creator`, and `creationDate` (a PDF date string or `DateTimeInterface`). It
+travels with the snapshot, participates in its fingerprint, and replaces all
+metadata set by the builder callback. Return `null` to leave existing builder
+metadata unchanged; metadata configured only in that callback is resolved at
+generation time and is not part of the snapshot fingerprint. Move
+document-specific metadata into `metadata()` for change detection. Metadata
+can contain sensitive information and must be protected like rendered HTML.
 
 ### PDF driver configurations
 
@@ -369,6 +403,9 @@ coordination. A worker crash after storage can also cause a retry.
 
 ### Latest rendered snapshot wins (opt-in)
 
+This section describes the default cache-backed policy. For database-backed
+ordering with coalesced queued work, see **Coalesced generation** below.
+
 Prevent an older queued snapshot from overwriting a newer synchronous HTTP
 publication by enabling this policy on the document:
 
@@ -417,8 +454,8 @@ must be queued, select `GenerateVersionedDocument` (also usable with disk
 storage), a non-unique custom job, or its progress-enabled equivalent.
 This policy prevents stale writes; it does not schedule replacement jobs.
 Equivalent snapshots may publish in either order. The fingerprint covers rendered
-HTML, target, and driver identifier, not mutable external assets or changes to a
-driver's implementation.
+HTML, document metadata, target, and driver identifier, not mutable external
+assets, builder-only metadata, or changes to a driver's implementation.
 
 Rendering now needs the shared persistent cache when opted in, even for
 generation without publication. All participating HTTP processes and workers
@@ -435,6 +472,182 @@ During a rolling upgrade, older processes still register a new ID for every
 render, including equivalent renders. Existing UUID-only markers cannot be
 matched to a fingerprint, so the first new registration supersedes them. Restart
 all rendering processes to obtain the equivalent-snapshot behavior consistently.
+
+### Coalesced generation (opt-in)
+
+Coalescing keeps the newest pending rendered snapshot per target. One queue
+wakeup normally processes it; a request arriving during generation replaces the
+pending snapshot and the worker continues with the newest one. Intermediate
+snapshots may be skipped. This mode currently requires the built-in `versioned`
+storage and `skyraptor/laravel-versioned-storage` 0.2.0-beta.1 or a compatible
+version. Install and migrate that package first, then publish and run the
+Documents migration:
+
+```bash
+php artisan vendor:publish --tag=laravel-documents-migrations
+php artisan migrate
+```
+
+Set `latest_snapshot_wins` and `coalescing.enabled` to `true` in
+`config/laravel-documents.php`. Set `coalescing.connection` and
+`laravel-versioned-storage.connection` to the same Laravel database connection
+(both default to the default connection), and run both packages' migrations on
+that connection. Every document rendered while coalescing is enabled must use
+versioned storage and latest-snapshot ordering. Calls starting inside a database
+transaction are rejected: enqueue after the caller's transaction commits.
+
+```php
+use SkyRaptor\LaravelDocuments\Facades\Documents;
+use Illuminate\Support\Facades\Schedule;
+
+// InvoiceDocument has public static string $storage = 'versioned'.
+$snapshot = $document->render();
+Documents::dispatchCoalesced($snapshot, connection: 'redis', queue: 'pdf');
+
+// Schedule the recovery command in the application's console routes:
+Schedule::command('documents:recover')->everyMinute();
+Schedule::command('laravel-versioned-storage:cleanup')->everyMinute();
+```
+
+`dispatchCoalesced()` returns `false` if that rendered snapshot was already
+superseded before it could be recorded, or `true` when it was accepted.
+Dispatch errors throw even though the recorded request remains recoverable.
+
+Dispatch accepts only a `RenderedDocument`. Rendering registers its ordering
+marker and pending snapshot together in one database transaction. If the caller
+crashes after that commit but before dispatch, the scheduler recovers the latest
+snapshot; a crash before the commit leaves the previous state intact. Rendering
+therefore requests eventual stored-PDF generation even when dispatch is never
+called. Dispatch requests an immediate wakeup; the queue job contains only its
+target key and worker token, and the worker reads the immutable snapshot from
+the database.
+
+Generation and coalesced recovery resolve the generator class captured in the snapshot. To
+use a custom generator, override `Document::generator()` to return its class
+name, or pass `generator: CustomGenerator::class` when constructing a
+`RenderedDocument`. Only the class-name string is stored; no generator instance
+is serialized. The class and its dependencies must be available to every worker.
+It participates in the snapshot fingerprint. Jobs always use the captured
+class; configure the generator on the document or snapshot rather than on
+the job. Keep container bindings consistent
+across renderers and workers, including bindings for the default `DocumentGenerator`.
+
+Work recovered before any explicit dispatch uses the default queue connection
+and queue. A new snapshot rendered while work is pending inherits that work's
+queue settings. If recovery starts before a dispatch specifying another queue,
+the existing wakeup may already be on the previous or default queue.
+
+Submit the snapshot even if a separate change check says its fingerprint matches:
+that check and dispatch are not atomic, and other snapshots may be registered
+between them. The worker checks for an existing matching PDF and skips
+generation when it can; publication still fences superseded snapshots.
+
+Run Laravel's scheduler and queue workers continuously. The durable target row
+is written before dispatch. If dispatch fails, the exception is raised and
+recovery retries after `coalescing.lease_seconds`. Terminal worker failures,
+crashes, and lost wakeups are also recovered; monitor failed jobs and command
+errors. Recovery attempts other targets and abandoned stages when one fails,
+reports additional failures, and rethrows the first failure so the command
+does not report success. Choose a lease longer than normal queue delay and processing time to
+avoid unnecessary duplicate attempts, and set the queue worker timeout below
+its queue's retry/visibility timeout. Recovery can dispatch another worker after
+a lease expires, so generation and wakeups are **at least once**, not exactly
+once. Recovery keeps existing wakeups valid even when queue delay exceeds the
+lease; overlapping workers can consequently process the same snapshot.
+Queue connection and name for recovery follow the latest pending request.
+Coalesced jobs do not implement the optional progress integration or batches.
+Also schedule Versioned Storage's cleanup command: it reclaims interrupted
+uploads that crashed before the document stage journal was recorded, as well
+as retired versions. Its own upload deadlines and cleanup grace apply.
+
+Synchronous `publishWithResult()` uses the same database ordering and staged
+publication, but rendering its snapshot also records recoverable queue work.
+The scheduler can run a worker concurrently with synchronous generation, so
+duplicate generation is possible. The first matching publication wins: later
+attempts discard their staged PDF and return the existing version, even if the
+generated PDF bytes differ. They do not emit `DocumentStored` again. If the
+existing PDF is missing, a new attempt publishes a replacement. File existence
+is checked while holding the target's database lock, so a slow storage check
+can delay other operations for that target.
+Successful synchronous publication or reuse clears matching pending work
+atomically; it does not clear a newer snapshot.
+For HTML-only previews, use `$document->html()` instead of `render()`; authorize
+any application route serving that HTML. A newer synchronous publication
+supersedes older pending work; if the same snapshot is already current and the
+PDF exists, the worker skips generation. Conversely, a newer queued snapshot
+supersedes an older synchronous attempt. Registration order is defined after
+rendering, not by source-record revision or the time a request started.
+
+For synchronous generation that may reuse an unchanged PDF, call
+`Documents::publishIfChanged($document)` (or pass an ordered
+`RenderedDocument`). It returns a `DocumentPublicationResult`: an existing
+version is reused only when its fingerprint matches and its file exists;
+otherwise it generates and publishes normally. If a newer snapshot is
+registered during the check, it returns `Superseded`. Reuse requires
+coalescing and versioned storage, and must run outside a database transaction.
+Reuse does not emit a new `DocumentStored` event. Versions published before the reuse migration are
+regenerated once because their version identifier was not recorded.
+
+`Documents::targetStatus($document->target())` exposes shared target state:
+`NotScheduled`, `Pending`, `Published`, or `Tombstoned` from
+`DocumentTargetStatus`. `Pending` includes queued, running, failed-attempt,
+and recovery-waiting work, including snapshots rendered but not explicitly
+dispatched; it is not a percentage or a terminal failure. A successful
+synchronous publication or reuse reports `Published` without a worker.
+`Published` means the latest fingerprint was published, not that the physical
+file has been checked at query time. This state is shared by all requests for
+that target, not attached to any individual job or requester.
+
+Versioned writes are staged outside a transaction. The target's latest snapshot
+check, current-version switch, and fingerprint update commit together on the
+same database connection. An ID is journaled before a stage can become ready;
+recovery discards abandoned stages after `coalescing.stage_retention_seconds`.
+Set this retention longer than the longest expected staging operation. Recovery
+may invalidate a slow stage, causing its publisher to fail and require a retry.
+Versioned Storage's upload deadlines, cleanup grace, filesystem and database
+failure limitations also apply. External writers and older application versions
+that bypass this protocol are not fenced: drain old workers and deploy the mode
+consistently before enabling it. Disabling or changing the database while work
+is outstanding also breaks coordination.
+
+Pending rendered snapshots are encrypted with Laravel's application encryption
+key until work completes. All renderers, workers, and recovery processes must
+share the same key. Configure Laravel's previous keys when rotating it and
+retain them until all pending snapshots encrypted with those keys have finished;
+losing the key causes explicit decryption failures and prevents recovery.
+Existing plaintext pending rows remain readable for upgrades, and old backups,
+replicas, logs, or failed-job records may retain plaintext. Encryption does not
+hide target metadata, fingerprints, or stored PDFs; restrict access and apply
+appropriate retention policies.
+
+Older package versions cannot read newly encrypted rows. Before upgrading,
+pause rendering, workers, and recovery, deploy the new version everywhere, and
+restart processes before resuming. Do not roll back while encrypted pending
+rows remain. Workers must also understand document metadata before receiving
+snapshots that contain it; drain old workers before enabling document-level
+metadata. Target ordering rows and fingerprints remain after completion to
+keep old snapshots fenced; do not delete them while old work or snapshots may
+exist.
+Only trusted processes should be allowed to modify these tables.
+
+Before deleting a document's underlying record, the application can fence
+existing and future registrations:
+
+```php
+Documents::tombstoneTarget($document->target());
+// To deliberately allow new work for this target later:
+Documents::restoreTarget($document->target());
+```
+
+Tombstoning supersedes existing snapshots, clears pending work, and rejects new
+registrations until an explicit restore. Previously captured snapshots remain
+superseded after restoration. These operations may run inside the same
+Laravel-managed transaction as the record deletion or restoration **when both
+use the same database connection**; a rollback restores the previous state.
+Neither operation physically deletes published PDFs or prevents writers that
+bypass this protocol. `Documents::invalidate($target)` remains available when
+only existing snapshots should be superseded without blocking new registrations;
+it does not clear an existing tombstone.
 
 ### Document events
 
@@ -478,10 +691,11 @@ argument is omitted or `null`; non-null arguments override only that setting.
 The lower-level `DocumentJobFactory::make()` accepts a snapshot instead; pass
 `job: $document->job()` to preserve the document's job setting when using it
 directly.
-Call `withGenerator(CustomGenerator::class)` on the returned job to select a
-custom generator. Extend `DocumentGenerator` and override
+Select a custom generator before rendering by overriding `Document::generator()`
+or passing `generator:` to `RenderedDocument`. Extend `DocumentGenerator` and override
 `protected generateContents(RenderedDocument $rendered): string` to customize
-the final PDF bytes while preserving generation IDs and events. Constructor
+the final PDF bytes while preserving generation IDs and events. The `generate()`
+entry point is final and cannot be overridden. Constructor
 dependencies are resolved from the worker's container. Jobs generate once per
 execution and pass that result to `DocumentPublisher`.
 Jobs implement
@@ -587,8 +801,11 @@ read PDF bytes from `contents` and pass that result to `DocumentPublisher::publi
 or `Documents::publish()`. Publication no longer accepts rendered input at the
 low level or regenerates PDF bytes. `DocumentJobFactory` and
 `DocumentSnapshotCache::changed()` still consume rendered input.
-Replace job `withRenderer()` calls with `withGenerator()` and move custom
-byte generation to `generateContents()`. Generation IDs are generation arguments
+Replace job `withRenderer()`, `withGenerator()`, and generator overrides with a
+generator selected on the document or rendered snapshot, and move custom byte
+generation to `generateContents()`. The job generator hook and
+`withGenerator()` are no longer used.
+Generation IDs are generation arguments
 and are carried by the generated result, not mutable generator state.
 The `snapshot_cache` configuration and existing event class names are unchanged.
 
