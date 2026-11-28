@@ -11,6 +11,8 @@ use InvalidArgumentException;
  * An immutable revision of a document: its rendered
  * HTML, storage context, and configuration identifiers. No document, driver,
  * or storage implementation is serialized into the rendered result.
+ * Constructing an ordered snapshot registers it immediately; in coalescing
+ * mode this also durably records recoverable work before construction returns.
  */
 final readonly class RenderedDocument
 {
@@ -57,11 +59,20 @@ final readonly class RenderedDocument
             throw new InvalidArgumentException('Restoring a registered snapshot requires coalescing and a valid UUID.');
         }
 
-        $this->snapshotId = $registeredSnapshotId ?? ($latestSnapshotWins
-            ? (config('laravel-documents.coalescing.enabled')
-                ? app(DocumentCoalescer::class)->capture($this->html, $this->target, $this->driver, $this->metadata, $this->generatorClass())
-                : app(DocumentSnapshotCache::class)->register($this->target, $this->fingerprint()))
-            : null);
+        $this->snapshotId = $registeredSnapshotId ?? $this->registerSnapshot($latestSnapshotWins);
+    }
+
+    private function registerSnapshot(bool $latestSnapshotWins): ?string
+    {
+        if (! $latestSnapshotWins) {
+            return null;
+        }
+
+        if (config('laravel-documents.coalescing.enabled')) {
+            return app(DocumentCoalescer::class)->capture($this->html, $this->target, $this->driver, $this->metadata, $this->generatorClass());
+        }
+
+        return app(DocumentSnapshotCache::class)->register($this->target, $this->fingerprint());
     }
 
     public function fingerprint(): string

@@ -527,10 +527,9 @@ use a custom generator, override `Document::generator()` to return its class
 name, or pass `generator: CustomGenerator::class` when constructing a
 `RenderedDocument`. Only the class-name string is stored; no generator instance
 is serialized. The class and its dependencies must be available to every worker.
-It participates in the snapshot fingerprint. `withGenerator()` on a regular
-job can only confirm the captured class, and regular jobs that override
-`generator()` are rejected in all modes; configure the snapshot generator
-instead. Keep container bindings consistent
+It participates in the snapshot fingerprint. Jobs always use the captured
+class; configure the generator on the document or snapshot rather than on
+the job. Keep container bindings consistent
 across renderers and workers, including bindings for the default `DocumentGenerator`.
 
 Work recovered before any explicit dispatch uses the default queue connection
@@ -802,9 +801,10 @@ read PDF bytes from `contents` and pass that result to `DocumentPublisher::publi
 or `Documents::publish()`. Publication no longer accepts rendered input at the
 low level or regenerates PDF bytes. `DocumentJobFactory` and
 `DocumentSnapshotCache::changed()` still consume rendered input.
-Replace job `withRenderer()` and generator overrides with a generator selected
-on the document or rendered snapshot, and move custom byte generation to
-`generateContents()`. `withGenerator()` only accepts the captured class.
+Replace job `withRenderer()`, `withGenerator()`, and generator overrides with a
+generator selected on the document or rendered snapshot, and move custom byte
+generation to `generateContents()`. The job generator hook and
+`withGenerator()` are no longer used.
 Generation IDs are generation arguments
 and are carried by the generated result, not mutable generator state.
 The `snapshot_cache` configuration and existing event class names are unchanged.

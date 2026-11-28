@@ -139,7 +139,7 @@ it('keeps the generation id across queued job serialization and retries', functi
     Event::fake([DocumentRendering::class, DocumentStored::class, DocumentRenderFailed::class]);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/46.pdf', 'documents'));
     $rendered = new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class);
-    $job = (new GenerateUniqueDocument($rendered))->withGenerator(FakeDocumentGenerator::class);
+    $job = (new GenerateUniqueDocument($rendered));
     $id = $job->generationId();
 
     $firstAttempt = unserialize(serialize($job));
@@ -276,8 +276,7 @@ it('does not fail a queued document job when a stored listener throws', function
     $listenerError = new Error('Listener failed after storage');
     Event::listen(DocumentStored::class, fn () => throw $listenerError);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/47.pdf', 'documents'));
-    $job = (new GenerateUniqueDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
-        ->withGenerator(FakeDocumentGenerator::class);
+    $job = (new GenerateUniqueDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)));
 
     dispatch_sync($job);
 

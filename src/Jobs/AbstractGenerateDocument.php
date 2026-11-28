@@ -9,8 +9,6 @@ use Illuminate\Bus\Queueable;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Support\Str;
-use InvalidArgumentException;
-use ReflectionMethod;
 use SkyRaptor\LaravelDocuments\DocumentGenerator;
 use SkyRaptor\LaravelDocuments\DocumentPublisher;
 use SkyRaptor\LaravelDocuments\Jobs\Contracts\GenerateDocument;
@@ -35,11 +33,6 @@ abstract class AbstractGenerateDocument implements GenerateDocument
     use InteractsWithQueue;
     use Queueable;
 
-    /**
-     * @var class-string<DocumentGenerator>
-     */
-    protected string $generatorClass = DocumentGenerator::class;
-
     // Keep the legacy field in native payloads for older workers.
     private ?string $generationId = null;
 
@@ -60,7 +53,6 @@ abstract class AbstractGenerateDocument implements GenerateDocument
          */
         protected RenderedDocument $rendered,
     ) {
-        $this->generatorClass = $rendered->generatorClass();
         $this->documentGenerationId = $this->generationId = (string) Str::uuid();
     }
 
@@ -102,26 +94,6 @@ abstract class AbstractGenerateDocument implements GenerateDocument
         return $this->documentGenerationId ??= $this->generationId ?? $this->job?->uuid() ?? (string) Str::uuid();
     }
 
-    /**
-     * Confirm the generator class captured by the snapshot.
-     *
-     * @param  class-string  $generator
-     */
-    public function withGenerator(string $generator): static
-    {
-        if (! is_a($generator, DocumentGenerator::class, true)) {
-            throw new InvalidArgumentException('The generator must extend '.DocumentGenerator::class.'.');
-        }
-
-        if ($generator !== $this->rendered->generatorClass()) {
-            throw new InvalidArgumentException('The job generator must match the snapshot generator.');
-        }
-
-        $this->generatorClass = $generator;
-
-        return $this;
-    }
-
     public function configureQueue(?string $connection, ?string $queue): static
     {
         if ($connection !== null) {
@@ -142,27 +114,11 @@ abstract class AbstractGenerateDocument implements GenerateDocument
      */
     public function generate(): ?string
     {
-        if ($this->generatorClass !== $this->rendered->generatorClass()) {
-            throw new InvalidArgumentException('The job generator must match the snapshot generator.');
-        }
-
-        if ((new ReflectionMethod($this, 'generator'))->getDeclaringClass()->getName() !== self::class) {
-            throw new InvalidArgumentException('A document job cannot override generator resolution; select the generator on the snapshot.');
-        }
-
         $generated = DocumentGenerator::generate($this->rendered, $this->generationId());
         $this->version = app(DocumentPublisher::class)->publish($generated);
         $this->generated = true;
 
         return $this->version;
-    }
-
-    /**
-     * Resolve the generator in the worker, including its container dependencies.
-     */
-    protected function generator(): DocumentGenerator
-    {
-        return app($this->generatorClass);
     }
 
     protected function documentBatchCancelled(): bool

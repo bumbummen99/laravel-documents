@@ -108,7 +108,7 @@ it('releases shared target locks after processing custom jobs with related model
         ? new GenerateDocumentWithRelatedModel($rendered)
         : new GenerateDocumentFailingWithMissingModels($rendered);
     $job->relatedModel = $user;
-    $job->withGenerator(FakeDocumentGenerator::class);
+
     $generationId = $job->generationId();
 
     Cache::setDefaultDriver('warmup-locks');

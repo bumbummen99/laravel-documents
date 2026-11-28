@@ -4,25 +4,20 @@ declare(strict_types=1);
 
 namespace SkyRaptor\LaravelDocuments;
 
-use Closure;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Bus;
-use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 use LogicException;
 use RuntimeException;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateCoalescedDocument;
-use SkyRaptor\LaravelDocuments\Storage\Contexts\FilesystemDocumentStorageContext;
 use SkyRaptor\LaravelDocuments\Storage\Contracts\DocumentStorage;
 use SkyRaptor\LaravelDocuments\Storage\DocumentStorageManager;
 use SkyRaptor\LaravelDocuments\Storage\VersionedDocumentStorage;
 use SkyRaptor\LaravelVersionedStorage\Database\MetadataTransaction;
-use SkyRaptor\LaravelVersionedStorage\VersionedStorage;
-use SkyRaptor\LaravelVersionedStorage\VersionedStorageHandler;
 use stdClass;
 use Throwable;
 
@@ -34,6 +29,8 @@ final class DocumentCoalescer
     public function __construct(
         private readonly DocumentPublisher $publisher,
         private readonly DocumentStorageManager $storage,
+        private readonly CoalescedSnapshotCodec $codec,
+        private readonly CoalescedStageRecovery $stages,
     ) {}
 
     /** @param class-string<DocumentGenerator> $generator */
@@ -59,7 +56,7 @@ final class DocumentCoalescer
             $connection->table('document_coalescing_targets')->where('target_key', $key)->update([
                 'latest_snapshot' => $snapshot,
                 'latest_fingerprint' => $fingerprint,
-                'pending' => $this->encodeSnapshot($rendered),
+                'pending' => $this->codec->encode($rendered),
                 'worker_token' => $row->worker_token ?? (string) Str::uuid(),
                 'lease_until' => $row->worker_token === null ? null : $row->lease_until,
                 'queue_connection' => $row->worker_token === null ? null : $row->queue_connection,
@@ -95,7 +92,7 @@ final class DocumentCoalescer
         }
 
         if (is_string($row->pending)) {
-            $pending = $this->decodeSnapshot($row->pending);
+            $pending = $this->codec->decode($row->pending);
 
             if ($pending->snapshotId === $row->latest_snapshot) {
                 return DocumentTargetStatus::Pending;
@@ -213,12 +210,7 @@ final class DocumentCoalescer
         }, 5);
     }
 
-    /**
-     * @param  Closure(string): void  $superseded
-     * @param  (Closure(): void)|null  $abandoned
-     * @param  (Closure(): void)|null  $reused
-     */
-    public function publish(GeneratedDocument $generated, DocumentStorage $storage, Closure $superseded, ?string $workerToken = null, ?Closure $abandoned = null, ?Closure $reused = null): string|false
+    public function publish(GeneratedDocument $generated, DocumentStorage $storage, ?string $workerToken = null): CoalescedPublicationResult
     {
         $this->assertTarget($generated->target);
 
@@ -237,10 +229,7 @@ final class DocumentCoalescer
             ]);
         });
 
-        $latest = null;
-        $lostOwnership = false;
-        $existingVersion = null;
-        $published = MetadataTransaction::run($connection, function () use ($connection, $key, $generated, $stage, $storage, $workerToken, &$latest, &$lostOwnership, &$existingVersion): bool {
+        $result = MetadataTransaction::run($connection, function () use ($connection, $key, $generated, $stage, $storage, $workerToken): CoalescedPublicationResult {
             $target = $this->lockTarget($connection, $key);
             $journal = $connection->table('document_coalescing_stages')->where('version', $stage->version)->lockForUpdate()->first();
 
@@ -253,24 +242,19 @@ final class DocumentCoalescer
             }
 
             if ($target->latest_snapshot !== $generated->snapshotId) {
-                $latest = $target->latest_snapshot;
-
-                return false;
+                return CoalescedPublicationResult::superseded($target->latest_snapshot);
             }
 
             if ($workerToken !== null && $target->worker_token !== $workerToken) {
-                $lostOwnership = true;
-
-                return false;
+                return CoalescedPublicationResult::abandoned();
             }
 
             if ($target->published_fingerprint === $generated->fingerprint
                 && is_string($target->published_version)
                 && $storage->exists($generated->target->context, $target->published_version)) {
-                $existingVersion = $target->published_version;
                 $this->clearPending($connection, $key);
 
-                return false;
+                return CoalescedPublicationResult::reused($target->published_version);
             }
 
             $stage->publish($storage->cleanup);
@@ -279,34 +263,19 @@ final class DocumentCoalescer
             $this->clearPending($connection, $key);
             $connection->table('document_coalescing_stages')->where('version', $stage->version)->delete();
 
-            return true;
+            return CoalescedPublicationResult::published($stage->version);
         }, 5);
 
-        if (! $published) {
+        if ($result->status !== CoalescedPublicationStatus::Published) {
             $stage->discard();
             $connection->table('document_coalescing_stages')->where('version', $stage->version)->delete();
-
-            if ($lostOwnership) {
-                $abandoned?->__invoke();
-
-                return false;
-            }
-
-            if ($existingVersion !== null) {
-                $reused?->__invoke();
-
-                return $existingVersion;
-            }
-
-            if (! is_string($latest) || $latest === '') {
-                throw new RuntimeException('The latest document snapshot marker is missing.');
-            }
-            $superseded($latest);
-
-            return false;
         }
 
-        return $stage->version;
+        if ($result->status === CoalescedPublicationStatus::Superseded && ($result->latestSnapshotId === null || $result->latestSnapshotId === '')) {
+            throw new RuntimeException('The latest document snapshot marker is missing.');
+        }
+
+        return $result;
     }
 
     public function dispatch(RenderedDocument $rendered, ?string $queueConnection = null, ?string $queue = null): bool
@@ -339,7 +308,7 @@ final class DocumentCoalescer
             $token = $row->worker_token === null ? (string) Str::uuid() : $row->worker_token;
             $wake = $row->worker_token === null || $row->lease_until === null;
             $connection->table('document_coalescing_targets')->where('target_key', $key)->update([
-                'pending' => $this->encodeSnapshot($rendered),
+                'pending' => $this->codec->encode($rendered),
                 'queue_connection' => $queueConnection,
                 'queue_name' => $queue,
                 'worker_token' => $token,
@@ -377,7 +346,7 @@ final class DocumentCoalescer
             if ($payload === null) {
                 return;
             }
-            $rendered = $this->decodeSnapshot($payload);
+            $rendered = $this->codec->decode($payload);
             $this->assertTarget($rendered->target);
 
             if ($this->key($rendered->target) !== $key) {
@@ -467,7 +436,7 @@ final class DocumentCoalescer
         }
 
         try {
-            $this->recoverStages($connection);
+            $this->stages->recover($connection, $this->positiveInteger('stage_retention_seconds'));
         } catch (Throwable $exception) {
             $failure = $this->recordRecoveryFailure($failure, $exception);
         }
@@ -475,69 +444,6 @@ final class DocumentCoalescer
         if ($failure !== null) {
             throw $failure;
         }
-    }
-
-    private function recoverStages(Connection $connection): void
-    {
-        $retention = $this->positiveInteger('stage_retention_seconds');
-        $versions = $connection->table('document_coalescing_stages')->useWritePdo()
-            ->where('created_at', '<=', now()->subSeconds($retention))->pluck('version');
-        $failure = null;
-        foreach ($versions as $version) {
-            try {
-                $this->recoverStage($connection, $version);
-            } catch (Throwable $exception) {
-                $failure = $this->recordRecoveryFailure($failure, $exception);
-            }
-        }
-
-        if ($failure !== null) {
-            throw $failure;
-        }
-    }
-
-    private function recoverStage(Connection $connection, string $version): void
-    {
-        $claimed = MetadataTransaction::run($connection, function () use ($connection, $version): bool {
-            $journal = $connection->table('document_coalescing_stages')->where('version', $version)
-                ->lockForUpdate()->first();
-
-            if ($journal === null) {
-                return false;
-            }
-            $connection->table('document_coalescing_stages')->where('version', $version)->update(['discarding' => true]);
-
-            return true;
-        }, 5);
-
-        if (! $claimed) {
-            return;
-        }
-        $stage = $connection->table('versioned_storage_stages as stages')->useWritePdo()
-            ->join('versioned_storage_resources as resources', 'resources.id', '=', 'stages.resource_id')
-            ->where('stages.version', $version)
-            ->first(['stages.state', 'stages.cleanup_after', 'resources.path', 'resources.disk', 'resources.is_directory']);
-
-        if ($stage === null) {
-            $connection->table('document_coalescing_stages')->where('version', $version)->delete();
-
-            return;
-        }
-
-        if ($stage->state === 'uploading' && $stage->cleanup_after > now()->toDateTimeString()) {
-            return;
-        }
-
-        if (! $stage->is_directory) {
-            throw new RuntimeException('The recorded document stage is not a directory.');
-        }
-        $handler = VersionedStorage::directory($stage->path, disk: $stage->disk);
-
-        if (! $handler instanceof VersionedStorageHandler) {
-            throw new LogicException('Expected a versioned storage handler.');
-        }
-        $handler->discardStage($version);
-        $connection->table('document_coalescing_stages')->where('version', $version)->delete();
     }
 
     private function recordRecoveryFailure(?Throwable $first, Throwable $exception): Throwable
@@ -571,56 +477,6 @@ final class DocumentCoalescer
             $job->onQueue($queue);
         }
         Bus::dispatch($job);
-    }
-
-    private function encodeSnapshot(RenderedDocument $rendered): string
-    {
-        $context = FilesystemDocumentStorageContext::from($rendered->target->context);
-
-        return 'encrypted:v1:'.Crypt::encryptString(json_encode([
-            'html' => $rendered->html,
-            'storage' => $rendered->target->storage,
-            'path' => $context->path,
-            'disk' => $context->disk,
-            'driver' => $rendered->driver,
-            'snapshot' => $rendered->snapshotId,
-            'metadata' => ($rendered->metadata ?? null)?->toArray(),
-            'generator' => $rendered->generatorClass(),
-        ], JSON_THROW_ON_ERROR));
-    }
-
-    private function decodeSnapshot(string $payload): RenderedDocument
-    {
-        if (str_starts_with($payload, 'encrypted:v1:')) {
-            $payload = Crypt::decryptString(substr($payload, strlen('encrypted:v1:')));
-        }
-        $data = json_decode($payload, true, flags: JSON_THROW_ON_ERROR);
-
-        if (! is_array($data)
-            || ! isset($data['html'], $data['storage'], $data['path'], $data['disk'], $data['driver'], $data['snapshot'])
-            || ! is_string($data['html']) || ! is_string($data['storage']) || ! is_string($data['path'])
-            || ! is_string($data['disk']) || ! is_string($data['driver']) || ! is_string($data['snapshot'])) {
-            throw new RuntimeException('The stored coalesced document snapshot is invalid.');
-        }
-
-        if (array_key_exists('metadata', $data) && $data['metadata'] !== null && ! is_array($data['metadata'])) {
-            throw new RuntimeException('The stored coalesced document metadata is invalid.');
-        }
-        $generator = array_key_exists('generator', $data) ? $data['generator'] : DocumentGenerator::class;
-
-        if (! is_string($generator) || ! is_a($generator, DocumentGenerator::class, true)) {
-            throw new RuntimeException('The stored coalesced document generator is invalid or unavailable.');
-        }
-
-        return new RenderedDocument(
-            $data['html'],
-            new DocumentTarget($data['storage'], new FilesystemDocumentStorageContext($data['path'], $data['disk'])),
-            $data['driver'],
-            latestSnapshotWins: true,
-            registeredSnapshotId: $data['snapshot'],
-            metadata: isset($data['metadata']) ? DocumentMetadata::fromArray($data['metadata']) : null,
-            generator: $generator,
-        );
     }
 
     private function assertTarget(DocumentTarget $target): void

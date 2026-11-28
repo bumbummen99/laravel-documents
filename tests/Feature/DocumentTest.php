@@ -132,12 +132,12 @@ it('can serialize the selected generator class on a queued job', function () {
         }
     };
     $rendered = $document->render();
-    $job = app(DocumentJobFactory::class)->make($rendered)->withGenerator(FakeDocumentGenerator::class);
+    $job = app(DocumentJobFactory::class)->make($rendered);
     $restored = unserialize(serialize($job));
 
-    $rendererMethod = new ReflectionMethod($restored, 'generator');
+    $snapshot = (new ReflectionClass($restored))->getProperty('rendered')->getValue($restored);
 
-    expect($rendererMethod->invoke($restored))->toBeInstanceOf(FakeDocumentGenerator::class);
+    expect($snapshot->generatorClass())->toBe(FakeDocumentGenerator::class);
 });
 
 it('resolves the default disk in the document target', function () {
@@ -200,10 +200,8 @@ it('resolves a container-bound generator when the queued job runs', function () 
 });
 
 it('rejects classes that are not document generators', function () {
-    $job = new GenerateUniqueDocument((new InvoiceDocument(15))->render());
-
-    $job->withGenerator(stdClass::class);
-})->throws(InvalidArgumentException::class, 'The generator must extend '.DocumentGenerator::class.'.');
+    new RenderedDocument('HTML', (new InvoiceDocument(15))->target(), generator: stdClass::class);
+})->throws(InvalidArgumentException::class, 'The document generator must extend '.DocumentGenerator::class.'.');
 
 it('lets a custom job be queued for any storage', function () {
     Queue::fake();

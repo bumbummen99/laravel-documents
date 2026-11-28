@@ -30,8 +30,8 @@ The snapshot records the generator's class name, not a generator instance.
 Generation resolves that class once through the container in every mode; work
 must not change the selected generator after rendering. Generator identity affects
 the fingerprint. Call `DocumentGenerator::generate()` statically rather than
-resolving an instance first. Regular jobs reject conflicting `withGenerator()`
-calls and `generator()` overrides; select the generator on the snapshot instead.
+resolving an instance first. Jobs always use the snapshot's generator; select it
+before rendering rather than on the job.
 
 PDF *generation* should only accept a previously *rendered* `RenderedDocument`.
 

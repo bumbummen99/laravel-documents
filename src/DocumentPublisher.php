@@ -49,8 +49,6 @@ class DocumentPublisher
     private function publishAttempt(GeneratedDocument $generated, ?string $workerToken = null): ?DocumentPublicationResult
     {
         $target = $generated->target;
-        $abandoned = false;
-        $reused = false;
 
         try {
             $storage = $this->storage->resolve($target->storage);
@@ -62,24 +60,31 @@ class DocumentPublisher
                     $latestSnapshotId,
                 ));
             };
-            $version = config('laravel-documents.coalescing.enabled')
-                ? app(DocumentCoalescer::class)->publish(
-                    $generated,
-                    $storage,
-                    $superseded,
-                    $workerToken,
-                    function () use (&$abandoned): void {
-                        $abandoned = true;
-                    },
-                    function () use (&$reused): void {
-                        $reused = true;
-                    },
-                )
-                : $this->snapshots->publish(
+
+            if (config('laravel-documents.coalescing.enabled')) {
+                $outcome = app(DocumentCoalescer::class)->publish($generated, $storage, $workerToken);
+
+                if ($outcome->status === CoalescedPublicationStatus::Abandoned) {
+                    return null;
+                }
+
+                if ($outcome->status === CoalescedPublicationStatus::Superseded) {
+                    $superseded($outcome->latestSnapshotId ?? throw new LogicException('A superseded publication must identify the latest snapshot.'));
+
+                    return DocumentPublicationResult::superseded();
+                }
+
+                if ($outcome->status === CoalescedPublicationStatus::Reused) {
+                    return DocumentPublicationResult::published($outcome->version);
+                }
+                $version = $outcome->version;
+            } else {
+                $version = $this->snapshots->publish(
                     $generated,
                     fn () => $storage->write($target->context, $generated->contents),
                     $superseded,
                 );
+            }
         } catch (Throwable $exception) {
             $this->dispatchDocumentEvent(new DocumentRenderFailed(
                 target: $target,
@@ -91,17 +96,11 @@ class DocumentPublisher
             throw $exception;
         }
 
-        if ($abandoned) {
-            return null;
-        }
-
         if ($version === false) {
             return DocumentPublicationResult::superseded();
         }
 
-        if (! $reused) {
-            $this->dispatchDocumentEvent(new DocumentStored($target, $generated->generationId, $version));
-        }
+        $this->dispatchDocumentEvent(new DocumentStored($target, $generated->generationId, $version));
 
         return DocumentPublicationResult::published($version);
     }

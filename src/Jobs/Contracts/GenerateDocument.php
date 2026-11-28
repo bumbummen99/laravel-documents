@@ -15,10 +15,5 @@ interface GenerateDocument extends ShouldQueue
 
     public function generate(): ?string;
 
-    /**
-     * @param  class-string  $generator
-     */
-    public function withGenerator(string $generator): static;
-
     public function configureQueue(?string $connection, ?string $queue): static;
 }

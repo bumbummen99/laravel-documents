@@ -40,11 +40,11 @@ use SkyRaptor\LaravelDocuments\Tests\Fixtures\QueueTables;
 /** @param class-string<DocumentGenerator> $generator */
 function trackedVersionedExample(int $number, string $generator = FakeDocumentGenerator::class): TrackedVersionedDocument
 {
-    return (new TrackedVersionedDocument(new RenderedDocument(
+    return new TrackedVersionedDocument(new RenderedDocument(
         'HTML',
         new DocumentTarget('fake-versioned', new FilesystemDocumentStorageContext("invoices/{$number}.pdf", 'documents')),
         generator: $generator,
-    )))->withGenerator($generator);
+    ));
 }
 
 function useDatabaseQueueForProgressTests(): void
@@ -108,8 +108,7 @@ it('tracks each document separately while Laravel tracks the batch', function ()
 
 it('tracks an unversioned unique job without requiring a batch', function () {
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/unique.pdf', 'documents'));
-    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
-        ->withGenerator(FakeDocumentGenerator::class);
+    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)));
     $id = $job->generationId();
 
     dispatch_sync($job);
@@ -124,8 +123,7 @@ it('tracks an unversioned unique job without requiring a batch', function () {
 
 it('allows contract-only custom jobs to reuse the progress integration', function () {
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/independent.pdf', 'documents'));
-    $job = (new IndependentTrackedDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
-        ->withGenerator(FakeDocumentGenerator::class);
+    $job = (new IndependentTrackedDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)));
 
     $job->handle();
 
@@ -149,8 +147,7 @@ it('shares unique locks between tracked and untracked jobs', function () {
 it('honours individual cancellation for a tracked unique job', function () {
     Event::fake([DocumentRendering::class]);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/cancelled.pdf', 'documents'));
-    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
-        ->withGenerator(FakeDocumentGenerator::class);
+    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)));
     GenerateUniqueDocumentWithProgress::getProgress($job->generationId(), createIfMissing: true)->cancel();
 
     dispatch_sync($job);
@@ -192,8 +189,7 @@ it('propagates a tracked unique job progress failure after storage', function ()
     Exceptions::fake();
     Event::fake([DocumentStored::class]);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/unique-failure.pdf', 'documents'));
-    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
-        ->withGenerator(FakeDocumentGenerator::class);
+    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)));
 
     expect(fn () => dispatch_sync($job))
         ->toThrow(RuntimeException::class, 'Unique progress cache failed after storage');
@@ -218,8 +214,7 @@ it('preserves upstream handling of a secondary progress failure after storage', 
     Exceptions::fake();
     Event::fake([DocumentStored::class, DocumentRenderFailed::class]);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/report-failure.pdf', 'documents'));
-    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
-        ->withGenerator(FakeDocumentGenerator::class);
+    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)));
 
     expect(fn () => $job->handle())
         ->toThrow(RuntimeException::class, 'Failure reporting also failed.');

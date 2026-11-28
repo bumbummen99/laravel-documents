@@ -57,9 +57,7 @@ it('preserves the captured generator fingerprint when creating and publishing jo
     $job = app(DocumentJobFactory::class)->makeIfChanged($snapshot);
 
     expect($job)->not->toBeNull();
-    expect(fn () => $job->withGenerator(HtmlDocumentGenerator::class))
-        ->toThrow(InvalidArgumentException::class, 'snapshot generator')
-        ->and(app(DocumentSnapshotCache::class)->changed($snapshot))->toBeTrue()
+    expect(app(DocumentSnapshotCache::class)->changed($snapshot))->toBeTrue()
         ->and(Storage::disk('documents')->exists('invoices/generator-cache.pdf'))->toBeFalse();
 
     $job->handle();
@@ -71,7 +69,7 @@ it('preserves the captured generator fingerprint when creating and publishing jo
     expect(app(DocumentJobFactory::class)->makeIfChanged($different))->not->toBeNull();
 })->with([false, true]);
 
-it('rejects overridden job generator resolution outside coalescing before publication', function () {
+it('ignores a legacy job generator override outside coalescing', function () {
     $snapshot = new RenderedDocument('wrong', new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/override.pdf', 'documents')), generator: FakeDocumentGenerator::class);
     $job = new class($snapshot) extends GenerateVersionedDocument
     {
@@ -81,9 +79,10 @@ it('rejects overridden job generator resolution outside coalescing before public
         }
     };
 
-    expect(fn () => $job->handle())->toThrow(InvalidArgumentException::class, 'generator resolution')
-        ->and(app(DocumentSnapshotCache::class)->changed($snapshot))->toBeTrue()
-        ->and(Storage::disk('documents')->exists('invoices/override.pdf'))->toBeFalse();
+    $job->handle();
+
+    expect(app(DocumentSnapshotCache::class)->changed($snapshot))->toBeFalse()
+        ->and(Storage::disk('documents')->get('invoices/override.pdf'))->toBe('rendered PDF');
 });
 
 it('uses the captured container binding on direct generation outside coalescing', function () {
@@ -98,20 +97,17 @@ it('uses the captured container binding on direct generation outside coalescing'
         ->and(app(DocumentSnapshotCache::class)->changed($snapshot))->toBeFalse();
 });
 
-it('rejects a job generator class changed after snapshot capture outside coalescing', function () {
+it('uses the captured generator despite an unrelated job generator field', function () {
     $snapshot = new RenderedDocument('wrong', new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/changed-generator.pdf', 'documents')), generator: FakeDocumentGenerator::class);
     $job = new class($snapshot) extends GenerateVersionedDocument
     {
-        public function changeGenerator(): void
-        {
-            $this->generatorClass = HtmlDocumentGenerator::class;
-        }
+        protected string $generatorClass = HtmlDocumentGenerator::class;
     };
-    $job->changeGenerator();
 
-    expect(fn () => $job->handle())->toThrow(InvalidArgumentException::class, 'snapshot generator')
-        ->and(app(DocumentSnapshotCache::class)->changed($snapshot))->toBeTrue()
-        ->and(Storage::disk('documents')->exists('invoices/changed-generator.pdf'))->toBeFalse();
+    $job->handle();
+
+    expect(app(DocumentSnapshotCache::class)->changed($snapshot))->toBeFalse()
+        ->and(Storage::disk('documents')->get('invoices/changed-generator.pdf'))->toBe('rendered PDF');
 });
 
 it('retains the last successful snapshot when PDF generation fails before publication', function () {

@@ -67,8 +67,7 @@ it('exposes the stored version on the job after it ran', function () {
     $storage->shouldReceive('write')->once()->andReturn('revision-7');
     app(DocumentStorageManager::class)->register('custom', fn () => $storage);
     $target = new DocumentTarget('custom', new FilesystemDocumentStorageContext('invoices/23.pdf', 'documents'));
-    $job = (new GenerateVersionedDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
-        ->withGenerator(FakeDocumentGenerator::class);
+    $job = (new GenerateVersionedDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)));
 
     expect($job->generated())->toBeFalse()
         ->and($job->version())->toBeNull();
@@ -81,8 +80,7 @@ it('exposes the stored version on the job after it ran', function () {
 
 it('marks unversioned documents as generated without a version', function () {
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/24.pdf', 'documents'));
-    $job = (new GenerateUniqueDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
-        ->withGenerator(FakeDocumentGenerator::class);
+    $job = (new GenerateUniqueDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)));
 
     $job->handle();
 
@@ -92,8 +90,7 @@ it('marks unversioned documents as generated without a version', function () {
 
 it('does not mark a failed generation as generated', function () {
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/25.pdf', 'documents'));
-    $job = (new GenerateVersionedDocument(new RenderedDocument('HTML', $target, generator: FailingDocumentGenerator::class)))
-        ->withGenerator(FailingDocumentGenerator::class);
+    $job = (new GenerateVersionedDocument(new RenderedDocument('HTML', $target, generator: FailingDocumentGenerator::class)));
 
     expect(fn () => $job->handle())->toThrow(RuntimeException::class, 'PDF generation failed')
         ->and($job->generated())->toBeFalse();
@@ -103,7 +100,6 @@ it('skips rendering when its batch was cancelled', function () {
     Event::fake([DocumentRendering::class]);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/26.pdf', 'documents'));
     [$job] = (new GenerateVersionedDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
-        ->withGenerator(FakeDocumentGenerator::class)
         ->withFakeBatch(cancelledAt: now()->toImmutable());
 
     $job->handle();
@@ -131,7 +127,7 @@ it('tracks versioned document jobs in a batch', function () {
 
     $jobs = collect([27, 28])->map(fn (int $number) => (new GenerateVersionedDocument(
         new RenderedDocument('HTML', new DocumentTarget('disk', new FilesystemDocumentStorageContext("invoices/{$number}.pdf", 'documents')), generator: FakeDocumentGenerator::class),
-    ))->withGenerator(FakeDocumentGenerator::class));
+    )));
 
     $batch = Bus::batch($jobs->all())->dispatch();
 

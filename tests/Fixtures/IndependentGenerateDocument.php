@@ -8,7 +8,6 @@ use Illuminate\Bus\Queueable;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Support\Str;
-use InvalidArgumentException;
 use SkyRaptor\LaravelDocuments\DocumentGenerator;
 use SkyRaptor\LaravelDocuments\DocumentPublisher;
 use SkyRaptor\LaravelDocuments\Jobs\Contracts\GenerateDocument;
@@ -30,15 +29,6 @@ class IndependentGenerateDocument implements GenerateDocument
     public function generationId(): string
     {
         return $this->id;
-    }
-
-    public function withGenerator(string $generator): static
-    {
-        if ($generator !== $this->rendered->generatorClass()) {
-            throw new InvalidArgumentException('The job generator must match the snapshot generator.');
-        }
-
-        return $this;
     }
 
     public function configureQueue(?string $connection, ?string $queue): static
