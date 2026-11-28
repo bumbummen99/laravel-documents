@@ -96,7 +96,8 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   marker and recoverable pending snapshot, even for synchronous generation.
   Set a custom generator on `Document::generator()` or the snapshot constructor
   before rendering. Only its class-name string is captured and fingerprinted;
-  workers resolve the instance. Regular jobs reject conflicting generator
+  workers and direct generator calls resolve the instance from the container.
+  Regular jobs reject conflicting generator
   classes and `generator()` overrides while coalescing is enabled.
   Recovery can queue it without explicit dispatch, using the default queue if
   none was selected. Use `$document->html()` for HTML-only previews and secure
@@ -160,7 +161,8 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   and events using `generationId`, or jobs using `generationId()`. Listener
   exceptions are reported and do not change the stored result.
 - Custom generators extend `DocumentGenerator` and override
-  `protected generateContents(RenderedDocument $rendered): string`; choose one
+  `protected generateContents(RenderedDocument $rendered): string`; `generate()`
+  is final. Choose one
   on a job with `withGenerator()`. Generation IDs belong to generated results,
   not mutable service state.
 - For optional Mateffy progress, install `mateffy/laravel-job-progress` and

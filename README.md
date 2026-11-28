@@ -125,11 +125,10 @@ Use the focused services when coordinating stages explicitly:
 
 ```php
 use SkyRaptor\LaravelDocuments\DocumentPublisher;
-use SkyRaptor\LaravelDocuments\DocumentGenerator;
 use SkyRaptor\LaravelDocuments\Jobs\DocumentJobFactory;
 
 $rendered = $document->render();
-$generated = app(DocumentGenerator::class)->generate($rendered);
+$generated = app($rendered->generatorClass())->generate($rendered);
 $version = app(DocumentPublisher::class)->publish($generated);
 ```
 
@@ -146,6 +145,13 @@ It does not retain the rendered HTML. `DocumentPublisher` accepts only that
 generated result and coordinates storage, snapshot-cache updates, and publication
 events; it has no generator dependency. `DocumentJobFactory` creates jobs from
 rendered input. No service is serialized into either result or a job.
+When coalescing is enabled, even a direct `DocumentGenerator::generate()` call
+uses the captured generator resolved from the container. Outside coalescing,
+direct calls use the generator instance on which they are invoked.
+
+`GeneratedDocument` accepts caller-supplied bytes. Publication checks its
+snapshot identity, but cannot verify that those bytes were produced from the
+snapshot; only trusted application code should construct one directly.
 
 Use `publishWithResult()` when the caller must distinguish a completed write
 from a superseded attempt:
@@ -689,7 +695,8 @@ directly.
 Call `withGenerator(CustomGenerator::class)` on the returned job to select a
 custom generator. Extend `DocumentGenerator` and override
 `protected generateContents(RenderedDocument $rendered): string` to customize
-the final PDF bytes while preserving generation IDs and events. Constructor
+the final PDF bytes while preserving generation IDs and events. The `generate()`
+entry point is final and cannot be overridden. Constructor
 dependencies are resolved from the worker's container. Jobs generate once per
 execution and pass that result to `DocumentPublisher`.
 Jobs implement

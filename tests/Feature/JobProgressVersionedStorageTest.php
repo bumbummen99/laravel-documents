@@ -27,6 +27,7 @@ use SkyRaptor\LaravelDocuments\Documents\Document;
 use SkyRaptor\LaravelDocuments\DocumentSnapshotCache;
 use SkyRaptor\LaravelDocuments\DocumentTarget;
 use SkyRaptor\LaravelDocuments\DocumentTargetStatus;
+use SkyRaptor\LaravelDocuments\Events\DocumentRendering;
 use SkyRaptor\LaravelDocuments\Events\DocumentStored;
 use SkyRaptor\LaravelDocuments\Facades\Documents;
 use SkyRaptor\LaravelDocuments\GeneratedDocument;
@@ -178,6 +179,54 @@ it('uses the document generator for synchronous publication and coalesced jobs',
         $job->handle();
         expect($document->get())->toBe('rendered PDF')
             ->and(Documents::targetStatus($document->target()))->toBe(DocumentTargetStatus::Published);
+    });
+});
+
+it('uses the captured generator for direct generation before recovery can reuse the publication', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $context = new FilesystemDocumentStorageContext('invoices/direct-generator.pdf', 'documents');
+        $snapshot = new RenderedDocument('wrong generator output', new DocumentTarget('versioned', $context), latestSnapshotWins: true, generator: FakeDocumentGenerator::class);
+        Event::fake([DocumentRendering::class, DocumentStored::class]);
+
+        $generated = app(HtmlDocumentGenerator::class)->generate($snapshot, 'direct-generation');
+        $result = Documents::publishWithResult($generated);
+
+        expect($generated->contents)->toBe('rendered PDF')
+            ->and($generated->generationId)->toBe('direct-generation')
+            ->and((new VersionedDocumentStorage)->get($context))->toBe('rendered PDF')
+            ->and(Documents::targetStatus($snapshot->target))->toBe(DocumentTargetStatus::Published)
+            ->and($result->version)->not->toBeNull();
+        Event::assertDispatchedOnce(DocumentRendering::class);
+        Event::assertDispatchedOnce(DocumentStored::class);
+    });
+});
+
+it('uses the container binding for the captured generator on direct calls', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $this->app->bind(FakeDocumentGenerator::class, HtmlDocumentGenerator::class);
+        $snapshot = new RenderedDocument('bound generator output', new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/bound-generator.pdf', 'documents')), latestSnapshotWins: true, generator: FakeDocumentGenerator::class);
+
+        $generated = app(DocumentGenerator::class)->generate($snapshot);
+
+        expect($generated->contents)->toBe('bound generator output')
+            ->and($generated->fingerprint)->toBe($snapshot->fingerprint());
+    });
+});
+
+it('uses the default generator binding for direct calls to a different generator', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $this->app->bind(DocumentGenerator::class, FakeDocumentGenerator::class);
+        $snapshot = new RenderedDocument('wrong generator output', new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/default-generator.pdf', 'documents')), latestSnapshotWins: true);
+
+        $generated = app(HtmlDocumentGenerator::class)->generate($snapshot);
+
+        expect($generated->contents)->toBe('rendered PDF');
     });
 });
 
@@ -1267,8 +1316,15 @@ it('recovers terminal worker failures and regenerates a missing current PDF', fu
         Config::set('queue.default', 'database');
         $context = new FilesystemDocumentStorageContext('invoices/failed-worker.pdf', 'documents');
         $target = new DocumentTarget('versioned', $context);
-        $generator = Mockery::mock(DocumentGenerator::class);
-        $generator->shouldReceive('generate')->andThrow(new RuntimeException('PDF renderer unavailable'));
+        $generator = new class extends DocumentGenerator
+        {
+            public function __construct() {}
+
+            protected function generateContents(RenderedDocument $rendered): string
+            {
+                throw new RuntimeException('PDF renderer unavailable');
+            }
+        };
         $this->app->instance(DocumentGenerator::class, $generator);
         $rendered = new RenderedDocument('retry', $target, latestSnapshotWins: true);
         Documents::dispatchCoalesced($rendered);

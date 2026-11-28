@@ -22,6 +22,7 @@ use SkyRaptor\LaravelDocuments\RenderedDocument;
 use SkyRaptor\LaravelDocuments\Storage\Contexts\FilesystemDocumentStorageContext;
 use SkyRaptor\LaravelDocuments\Storage\Contracts\DocumentStorage;
 use SkyRaptor\LaravelDocuments\Storage\DocumentStorageManager;
+use SkyRaptor\LaravelDocuments\Tests\Fixtures\FailingDocumentGenerator;
 use Spatie\LaravelPdf\Drivers\PdfDriver;
 use Spatie\LaravelPdf\PdfOptions;
 
@@ -90,15 +91,30 @@ it('keeps the facade generate then publish sequence to one render and one genera
         new FilesystemDocumentStorageContext('invoice.pdf', 'documents'),
     ));
     $document->shouldReceive('render')->once()->andReturn($rendered);
-    $generator = Mockery::mock(DocumentGenerator::class);
-    $generator->shouldReceive('generate')->once()->with($rendered, null)
-        ->andReturn(new GeneratedDocument($rendered, 'one PDF', 'generation-1'));
+    $generator = new class extends DocumentGenerator
+    {
+        public int $calls = 0;
+
+        public ?RenderedDocument $input = null;
+
+        public function __construct() {}
+
+        protected function generateContents(RenderedDocument $rendered): string
+        {
+            $this->calls++;
+            $this->input = $rendered;
+
+            return 'one PDF';
+        }
+    };
     app()->instance(DocumentGenerator::class, $generator);
 
     $generated = Documents::generate($document);
 
     expect(Documents::publish($generated))->toBeNull()
-        ->and(Storage::disk('documents')->get('invoice.pdf'))->toBe('one PDF');
+        ->and(Storage::disk('documents')->get('invoice.pdf'))->toBe('one PDF')
+        ->and($generator->calls)->toBe(1)
+        ->and($generator->input)->toBe($rendered);
 });
 
 it('publishes a serialized generation result without a generator or driver configuration', function () {
@@ -122,9 +138,7 @@ it('publishes an existing generated result with an explicit outcome without gene
         new FilesystemDocumentStorageContext('invoice.pdf', 'documents'),
     ));
     $generated = new GeneratedDocument($rendered, 'already generated', 'generation-1');
-    $generator = Mockery::mock(DocumentGenerator::class);
-    $generator->shouldNotReceive('generate');
-    app()->instance(DocumentGenerator::class, $generator);
+    app()->bind(DocumentGenerator::class, FailingDocumentGenerator::class);
     Event::fake([DocumentStored::class]);
 
     $result = Documents::publishWithResult($generated, generationId: 'generation-1');
@@ -226,9 +240,7 @@ it('creates jobs directly from rendered input without rendering or generating ag
         'disk',
         new FilesystemDocumentStorageContext('invoice.pdf', 'documents'),
     ));
-    $generator = Mockery::mock(DocumentGenerator::class);
-    $generator->shouldNotReceive('generate');
-    app()->instance(DocumentGenerator::class, $generator);
+    app()->bind(DocumentGenerator::class, FailingDocumentGenerator::class);
 
     $job = Documents::{$method}($rendered, connection: 'redis', queue: 'pdf', job: $jobClass);
 

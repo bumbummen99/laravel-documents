@@ -52,8 +52,15 @@ it('retains the last successful snapshot when PDF generation fails before public
     $first = cachedSnapshot('first');
     app(DocumentWorkflow::class)->publish($first);
     $failedSnapshot = cachedSnapshot('second');
-    $generator = Mockery::mock(DocumentGenerator::class);
-    $generator->shouldReceive('generate')->once()->with($failedSnapshot, null)->andThrow(new RuntimeException('Generation failed.'));
+    $generator = new class extends DocumentGenerator
+    {
+        public function __construct() {}
+
+        protected function generateContents(RenderedDocument $rendered): string
+        {
+            throw new RuntimeException('Generation failed.');
+        }
+    };
     app()->instance(DocumentGenerator::class, $generator);
 
     expect(fn () => app(DocumentWorkflow::class)->publish($failedSnapshot))->toThrow(RuntimeException::class, 'Generation failed.')

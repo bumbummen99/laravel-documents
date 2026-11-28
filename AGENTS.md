@@ -29,6 +29,7 @@ It contains the `Document`'s immutable, *rendered* HTML, document-level PDF meta
 The snapshot records the generator's class name, not a generator instance.
 Workers resolve that class through the container; coalesced work must not change
 the selected generator after rendering. Generator identity affects the fingerprint.
+Direct generator calls also resolve the captured class when coalescing is enabled.
 Regular jobs reject `generator()` overrides while coalescing is enabled; select
 the generator on the snapshot instead.
 
@@ -41,6 +42,8 @@ The `GeneratedDocument` is the immutable, serializable output of PDF generation:
 final bytes plus the target, original rendered fingerprint, and generation ID.
 Publication consumes this result without repeating rendering or generation.
 It must not retain the original document, rendered HTML, or generator service.
+Its public constructor accepts caller-supplied bytes and does not authenticate
+their origin; only trusted application code should construct results directly.
 
 #### DocumentStorage
 The `DocumentStorage` interface is a Contract that defines how a Document is stored and accessed.
@@ -69,6 +72,7 @@ The *generation* of the PDF file can be done in sync or be dispatched to the Que
 `DocumentGenerator::generate(RenderedDocument $rendered)` produces an immutable,
 serializable `GeneratedDocument` containing final post-processed PDF `contents`,
 the target, the rendered fingerprint, and a generation ID, without retaining HTML.
+Its `generate()` method is final; customize PDF bytes through `generateContents()`.
 `DocumentPublisher::publish(GeneratedDocument $generated)` coordinates storage,
 fingerprint updates, and publication events. It has no generator dependency.
 `Jobs\DocumentJobFactory` creates jobs from rendered input without dispatching
