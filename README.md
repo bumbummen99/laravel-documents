@@ -615,6 +615,16 @@ synchronous publication or reuse reports `Published` without a worker.
 file has been checked at query time. This state is shared by all requests for
 that target, not attached to any individual job or requester.
 
+For background freshness checks, `DocumentCoalescer::captureIfUnchanged($target,
+$load)` observes the target before invoking the document-loading closure. It
+returns `null` if another snapshot was registered or the target was retired
+before capture completes. Load fresh source data inside the closure. An already
+published, unchanged file is reused without creating pending work; otherwise the
+returned snapshot is durable pending work and can be dispatched or recovered.
+`publishedVersion($snapshot)` and `isCurrent($snapshot)` inspect the target without
+clearing pending work. Recheck after reading a version: these observations do
+not reserve it or prevent subsequent publication or retirement.
+
 Versioned writes are staged outside a transaction. The target's latest snapshot
 check, current-version switch, and fingerprint update commit together on the
 same database connection. An ID is journaled before a stage can become ready;

@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Storage;
+use SkyRaptor\LaravelDocuments\DocumentCoalescer;
 use SkyRaptor\LaravelDocuments\DocumentGenerator;
 use SkyRaptor\LaravelDocuments\DocumentMetadata;
 use SkyRaptor\LaravelDocuments\Documents\Document;
@@ -41,6 +42,82 @@ beforeEach(function () {
     $this->app->forgetInstance('encrypter');
     Crypt::clearResolvedInstance('encrypter');
     Storage::fake('documents');
+});
+
+it('conditionally captures without replacing a newer registered snapshot', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $document = new class extends Document
+        {
+            public static string $storage = 'versioned';
+
+            public static ?string $path = 'invoices/conditional.pdf';
+
+            public static ?string $disk = 'documents';
+
+            public static ?bool $latestSnapshotWins = true;
+
+            public ?Closure $duringHtml = null;
+
+            public function html(): string
+            {
+                ($this->duringHtml)?->__invoke();
+
+                return 'old';
+            }
+        };
+        $initial = $document->render();
+        $document->duringHtml = fn () => new RenderedDocument('new', $document->target(), latestSnapshotWins: true);
+
+        $result = app(DocumentCoalescer::class)->captureIfUnchanged($document->target(), fn () => $document);
+
+        expect($result)->toBeNull()
+            ->and(Documents::targetStatus($document->target()))->toBe(DocumentTargetStatus::Pending);
+        $row = DB::table('document_coalescing_targets')->first();
+        expect($row->latest_snapshot)->not->toBe($initial->snapshotId)
+            ->and($row->latest_fingerprint)->toBe(RenderedDocument::fingerprintFor('new', $document->target(), $document->pdfDriver()));
+    });
+});
+
+it('inspects an unchanged publication without registering pending work', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $document = new class extends Document
+        {
+            public static string $storage = 'versioned';
+
+            public static ?string $path = 'invoices/inspect.pdf';
+
+            public static ?string $disk = 'documents';
+
+            public static ?bool $latestSnapshotWins = true;
+
+            public function html(): string
+            {
+                return 'same';
+            }
+
+            public function generator(): string
+            {
+                return HtmlDocumentGenerator::class;
+            }
+        };
+        $published = Documents::publishIfChanged($document);
+        $coalescer = app(DocumentCoalescer::class);
+        $captured = $coalescer->captureIfUnchanged($document->target(), fn () => $document);
+
+        expect($captured)->not->toBeNull()
+            ->and($coalescer->publishedVersion($captured))->toBe($published->version)
+            ->and($coalescer->isCurrent($captured))->toBeTrue()
+            ->and(Documents::targetStatus($document->target()))->toBe(DocumentTargetStatus::Published)
+            ->and(DB::table('document_coalescing_targets')->first()->pending)->toBeNull();
+
+        new RenderedDocument('new', $document->target(), latestSnapshotWins: true);
+        expect($coalescer->publishedVersion($captured))->toBeNull()
+            ->and($coalescer->isCurrent($captured))->toBeFalse();
+    });
 });
 
 it('recovers the generator captured with the snapshot before dispatch', function () {

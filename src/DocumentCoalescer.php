@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace SkyRaptor\LaravelDocuments;
 
+use Closure;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Carbon;
@@ -13,6 +14,7 @@ use Illuminate\Support\Str;
 use InvalidArgumentException;
 use LogicException;
 use RuntimeException;
+use SkyRaptor\LaravelDocuments\Documents\Document;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateCoalescedDocument;
 use SkyRaptor\LaravelDocuments\Storage\Contracts\DocumentStorage;
 use SkyRaptor\LaravelDocuments\Storage\DocumentStorageManager;
@@ -32,6 +34,128 @@ final class DocumentCoalescer
         private readonly CoalescedSnapshotCodec $codec,
         private readonly CoalescedStageRecovery $stages,
     ) {}
+
+    /**
+     * Load and render only after observing the current target revision. If another
+     * request registers a revision in the meantime, leave that revision untouched.
+     *
+     * @param  Closure(): Document  $load
+     */
+    public function captureIfUnchanged(DocumentTarget $target, Closure $load): ?RenderedDocument
+    {
+        $this->assertEnabled();
+        $this->assertTarget($target);
+        $connection = $this->connection();
+        $this->assertOutsideTransaction($connection);
+        $key = $this->key($target);
+        $observed = $connection->table('document_coalescing_targets')->useWritePdo()->where('target_key', $key)->first();
+
+        if ($observed?->tombstoned) {
+            return null;
+        }
+
+        $document = $load();
+        $actual = $document->target();
+
+        if ($actual->storage !== $target->storage || $actual->context->identity() !== $target->context->identity()) {
+            throw new LogicException('The loaded document must have the observed target.');
+        }
+
+        if (! $document->latestSnapshotWins()) {
+            throw new LogicException('Conditional capture requires latest snapshot ordering.');
+        }
+
+        $html = $document->html();
+        $driver = $document->pdfDriver();
+        $metadata = $document->metadata();
+        $generator = $document->generator();
+        $fingerprint = RenderedDocument::fingerprintFor($html, $target, $driver, $metadata, $generator);
+        $reusable = is_string($observed?->published_version)
+            && $observed->published_fingerprint === $fingerprint
+            && $this->storage->resolve($target->storage)->exists($target->context, $observed->published_version)
+                ? $observed->published_version
+                : null;
+
+        return MetadataTransaction::run($connection, function () use ($connection, $key, $observed, $target, $html, $driver, $metadata, $generator, $fingerprint, $reusable): ?RenderedDocument {
+            $row = $this->lockTarget($connection, $key);
+
+            if ($row->tombstoned || $row->latest_snapshot !== $observed?->latest_snapshot) {
+                return null;
+            }
+
+            $snapshot = $row->latest_fingerprint === $fingerprint && is_string($row->latest_snapshot)
+                ? $row->latest_snapshot
+                : (string) Str::uuid();
+            $rendered = new RenderedDocument($html, $target, $driver, latestSnapshotWins: true, registeredSnapshotId: $snapshot, metadata: $metadata, generator: $generator);
+
+            if ($row->latest_snapshot === $snapshot
+                && ($row->pending !== null || ($reusable !== null && $row->published_version === $reusable && $row->published_fingerprint === $fingerprint))) {
+                return $rendered;
+            }
+
+            $connection->table('document_coalescing_targets')->where('target_key', $key)->update([
+                'latest_snapshot' => $snapshot,
+                'latest_fingerprint' => $fingerprint,
+                'pending' => $this->codec->encode($rendered),
+                'worker_token' => $row->worker_token ?? (string) Str::uuid(),
+                'lease_until' => $row->worker_token === null ? null : $row->lease_until,
+                'queue_connection' => $row->worker_token === null ? null : $row->queue_connection,
+                'queue_name' => $row->worker_token === null ? null : $row->queue_name,
+            ]);
+
+            return $rendered;
+        }, 5);
+    }
+
+    public function publishedVersion(RenderedDocument $rendered): ?string
+    {
+        $this->assertEnabled();
+        $this->assertTarget($rendered->target);
+
+        if ($rendered->snapshotId === null) {
+            throw new LogicException('Publication inspection requires an ordered rendered snapshot.');
+        }
+
+        $connection = $this->connection();
+        $this->assertOutsideTransaction($connection);
+        $key = $this->key($rendered->target);
+        $row = $connection->table('document_coalescing_targets')->useWritePdo()->where('target_key', $key)->first();
+
+        if ($row === null || $row->tombstoned || $row->latest_snapshot !== $rendered->snapshotId
+            || $row->latest_fingerprint !== $rendered->fingerprint()
+            || $row->published_fingerprint !== $rendered->fingerprint() || ! is_string($row->published_version)) {
+            return null;
+        }
+
+        $version = $row->published_version;
+
+        if (! $this->storage->resolve($rendered->target->storage)->exists($rendered->target->context, $version)) {
+            return null;
+        }
+        $current = $connection->table('document_coalescing_targets')->useWritePdo()->where('target_key', $key)->first();
+
+        return $current !== null && ! $current->tombstoned && $current->latest_snapshot === $rendered->snapshotId
+            && $current->latest_fingerprint === $rendered->fingerprint()
+            && $current->published_fingerprint === $rendered->fingerprint() && $current->published_version === $version
+                ? $version
+                : null;
+    }
+
+    public function isCurrent(RenderedDocument $rendered): bool
+    {
+        $this->assertEnabled();
+        $this->assertTarget($rendered->target);
+
+        if ($rendered->snapshotId === null) {
+            throw new LogicException('Current revision inspection requires an ordered rendered snapshot.');
+        }
+
+        $row = $this->connection()->table('document_coalescing_targets')->useWritePdo()
+            ->where('target_key', $this->key($rendered->target))->first();
+
+        return $row !== null && ! $row->tombstoned && $row->latest_snapshot === $rendered->snapshotId
+            && $row->latest_fingerprint === $rendered->fingerprint();
+    }
 
     /** @param class-string<DocumentGenerator> $generator */
     public function capture(string $html, DocumentTarget $target, string $driver, ?DocumentMetadata $metadata = null, string $generator = DocumentGenerator::class): string
