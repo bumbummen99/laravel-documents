@@ -25,6 +25,7 @@ use SkyRaptor\LaravelDocuments\RenderedDocument;
  * @method static bool dispatchCoalesced(RenderedDocument $document, ?string $connection = null, ?string $queue = null)
  * @method static void invalidate(DocumentTarget $target)
  * @method static void tombstoneTarget(DocumentTarget $target)
+ * @method static void retireTarget(DocumentTarget $target)
  * @method static void restoreTarget(DocumentTarget $target)
  *
  * @see DocumentWorkflow

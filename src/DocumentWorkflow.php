@@ -116,6 +116,11 @@ class DocumentWorkflow
         app(DocumentCoalescer::class)->tombstone($target);
     }
 
+    public function retireTarget(DocumentTarget $target): void
+    {
+        app(DocumentCoalescer::class)->retire($target);
+    }
+
     public function restoreTarget(DocumentTarget $target): void
     {
         app(DocumentCoalescer::class)->restore($target);

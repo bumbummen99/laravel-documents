@@ -167,6 +167,28 @@ final class DocumentCoalescer
         $this->resetTarget($target, true);
     }
 
+    public function retire(DocumentTarget $target): void
+    {
+        $this->assertEnabled();
+        $this->assertTarget($target);
+        $storage = $this->storage->resolve($target->storage);
+
+        if (! $storage instanceof VersionedDocumentStorage) {
+            throw new LogicException('Document retirement requires versioned document storage.');
+        }
+
+        $connection = $this->connection();
+
+        if ($connection->transactionLevel() === 0 && $connection->getPdo()->inTransaction()) {
+            throw new LogicException('Document retirement requires a Laravel-managed transaction.');
+        }
+
+        MetadataTransaction::run($connection, function () use ($target, $storage): void {
+            $this->tombstone($target);
+            $storage->retire($target->context);
+        }, 5);
+    }
+
     public function restore(DocumentTarget $target): void
     {
         $this->assertEnabled();

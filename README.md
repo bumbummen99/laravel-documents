@@ -639,6 +639,12 @@ Documents::tombstoneTarget($document->target());
 Documents::restoreTarget($document->target());
 ```
 
+When using a Laravel Versioned Storage version with resource retirement support,
+`Documents::retireTarget($target)` also hides all published versions and schedules
+their physical deletion through Versioned Storage cleanup. Fencing and retirement
+commit together on the shared database connection. Previously issued direct URLs
+may remain usable until cleanup removes the files.
+
 Tombstoning supersedes existing snapshots, clears pending work, and rejects new
 registrations until an explicit restore. Previously captured snapshots remain
 superseded after restoration. These operations may run inside the same

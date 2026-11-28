@@ -27,6 +27,8 @@ abstract class OptionalVersionedStorageHandler
 
     abstract public function exists(string $path, ?string $version = null): bool;
 
+    abstract public function retire(): void;
+
     /**
      * @return list<string>
      */

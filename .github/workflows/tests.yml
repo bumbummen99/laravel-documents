@@ -108,7 +108,8 @@ jobs:
           testbench: ${{ matrix.testbench }}
           stability: ${{ matrix.stability }}
           extensions: pcntl, posix, sockets
-          packages: skyraptor/laravel-versioned-storage:0.2.0-beta.1
+          # Replace with a released version containing resource retirement.
+          packages: skyraptor/laravel-versioned-storage:dev-master#55b80db9ceac208ad82163fdb244fa0cac499b9a
 
       - name: PHPStan
         run: composer analyse
