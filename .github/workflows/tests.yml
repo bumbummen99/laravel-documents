@@ -114,7 +114,13 @@ jobs:
         run: composer analyse
 
       - name: Test Suite
-        run: vendor/bin/pest tests/Feature/JobProgressVersionedStorageTest.php --fail-on-skipped
+        run: >-
+          vendor/bin/pest
+          tests/Feature/CoalescedSnapshotTest.php
+          tests/Feature/CoalescedRecoveryTest.php
+          tests/Feature/CoalescedVersionedStorageTest.php
+          tests/Feature/JobProgressVersionedStorageTest.php
+          --fail-on-skipped
 
   without-optional-dependencies-tests:
     needs: checks
