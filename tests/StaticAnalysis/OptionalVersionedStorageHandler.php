@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace SkyRaptor\LaravelDocuments\Tests\StaticAnalysis;
 
 use Closure;
+use Illuminate\Database\Connection;
 use LogicException;
+use SkyRaptor\LaravelVersionedStorage\Database\MetadataTransaction;
 use SkyRaptor\LaravelVersionedStorage\StagedVersion;
 use SkyRaptor\LaravelVersionedStorage\VersionedStorage;
 use SkyRaptor\LaravelVersionedStorage\VersionedStorageHandler;
@@ -48,6 +50,21 @@ class OptionalVersionedStorage
     }
 }
 
+class OptionalMetadataTransaction
+{
+    /**
+     * @template TReturn
+     *
+     * @param  Closure(): TReturn  $callback
+     * @param  positive-int  $attempts
+     * @return TReturn
+     */
+    public static function run(Connection $connection, Closure $callback, int $attempts = 1): mixed
+    {
+        throw new LogicException('The optional versioned-storage package is not installed.');
+    }
+}
+
 if (! class_exists(VersionedStorageHandler::class)) {
     class_alias(OptionalVersionedStorageHandler::class, VersionedStorageHandler::class);
 }
@@ -58,4 +75,8 @@ if (! class_exists(StagedVersion::class)) {
 
 if (! class_exists(VersionedStorage::class)) {
     class_alias(OptionalVersionedStorage::class, VersionedStorage::class);
+}
+
+if (! class_exists(MetadataTransaction::class)) {
+    class_alias(OptionalMetadataTransaction::class, MetadataTransaction::class);
 }

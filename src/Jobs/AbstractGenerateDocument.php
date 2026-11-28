@@ -10,6 +10,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
+use ReflectionMethod;
 use SkyRaptor\LaravelDocuments\DocumentGenerator;
 use SkyRaptor\LaravelDocuments\DocumentPublisher;
 use SkyRaptor\LaravelDocuments\Jobs\Contracts\GenerateDocument;
@@ -141,6 +142,16 @@ abstract class AbstractGenerateDocument implements GenerateDocument
      */
     public function generate(): ?string
     {
+        if (config('laravel-documents.coalescing.enabled')) {
+            if ($this->generatorClass !== $this->rendered->generatorClass()) {
+                throw new InvalidArgumentException('The job generator must match the coalesced snapshot generator.');
+            }
+
+            if ((new ReflectionMethod($this, 'generator'))->getDeclaringClass()->getName() !== self::class) {
+                throw new InvalidArgumentException('A coalesced job cannot override generator resolution; select the generator on the snapshot.');
+            }
+        }
+
         $generated = $this->generator()->generate($this->rendered, $this->generationId());
         $this->version = app(DocumentPublisher::class)->publish($generated);
         $this->generated = true;
@@ -153,10 +164,6 @@ abstract class AbstractGenerateDocument implements GenerateDocument
      */
     protected function generator(): DocumentGenerator
     {
-        if (config('laravel-documents.coalescing.enabled') && $this->generatorClass !== $this->rendered->generatorClass()) {
-            throw new InvalidArgumentException('The job generator must match the coalesced snapshot generator.');
-        }
-
         return app($this->generatorClass);
     }
 

@@ -29,6 +29,8 @@ It contains the `Document`'s immutable, *rendered* HTML, document-level PDF meta
 The snapshot records the generator's class name, not a generator instance.
 Workers resolve that class through the container; coalesced work must not change
 the selected generator after rendering. Generator identity affects the fingerprint.
+Regular jobs reject `generator()` overrides while coalescing is enabled; select
+the generator on the snapshot instead.
 
 PDF *generation* should only accept a previously *rendered* `RenderedDocument`.
 

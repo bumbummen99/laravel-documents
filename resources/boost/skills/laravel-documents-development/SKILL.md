@@ -96,7 +96,8 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   marker and recoverable pending snapshot, even for synchronous generation.
   Set a custom generator on `Document::generator()` or the snapshot constructor
   before rendering. Only its class-name string is captured and fingerprinted;
-  workers resolve the instance. Coalesced jobs reject conflicting overrides.
+  workers resolve the instance. Regular jobs reject conflicting generator
+  classes and `generator()` overrides while coalescing is enabled.
   Recovery can queue it without explicit dispatch, using the default queue if
   none was selected. Use `$document->html()` for HTML-only previews and secure
   the application route. Concurrent synchronous and queued generation can

@@ -182,6 +182,54 @@ it('uses the document generator for synchronous publication and coalesced jobs',
     });
 });
 
+it('rejects overridden job generator resolution before publishing and recovers the captured generator', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('queue.default', 'database');
+        $context = new FilesystemDocumentStorageContext('invoices/overridden-generator.pdf', 'documents');
+        $snapshot = new RenderedDocument('different', new DocumentTarget('versioned', $context), latestSnapshotWins: true, generator: FakeDocumentGenerator::class);
+        $job = new class($snapshot) extends GenerateVersionedDocument
+        {
+            protected function generator(): DocumentGenerator
+            {
+                return app(HtmlDocumentGenerator::class);
+            }
+        };
+        Event::fake([DocumentStored::class]);
+
+        expect(fn () => $job->handle())->toThrow(InvalidArgumentException::class, 'generator');
+        Event::assertNotDispatched(DocumentStored::class);
+        expect((new VersionedDocumentStorage)->versions($context))->toBe([])
+            ->and(Documents::targetStatus($snapshot->target))->toBe(DocumentTargetStatus::Pending);
+
+        $this->artisan('documents:recover')->assertSuccessful();
+        $this->artisan('queue:work', ['connection' => 'database', '--once' => true])->assertSuccessful();
+        expect((new VersionedDocumentStorage)->get($context))->toBe('rendered PDF');
+    });
+});
+
+it('rejects a job generator class changed after snapshot capture', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $context = new FilesystemDocumentStorageContext('invoices/changed-generator.pdf', 'documents');
+        $snapshot = new RenderedDocument('different', new DocumentTarget('versioned', $context), latestSnapshotWins: true, generator: FakeDocumentGenerator::class);
+        $job = new class($snapshot) extends GenerateVersionedDocument
+        {
+            public function changeGenerator(): void
+            {
+                $this->generatorClass = HtmlDocumentGenerator::class;
+            }
+        };
+        $job->changeGenerator();
+
+        expect(fn () => $job->handle())->toThrow(InvalidArgumentException::class, 'generator')
+            ->and((new VersionedDocumentStorage)->versions($context))->toBe([])
+            ->and(Documents::targetStatus($snapshot->target))->toBe(DocumentTargetStatus::Pending);
+    });
+});
+
 it('restores the connection when a snapshot capture fails during commit', function () {
     withRealVersionedStorage(function () {
         createCoalescingTables();

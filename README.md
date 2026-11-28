@@ -522,8 +522,10 @@ name, or pass `generator: CustomGenerator::class` when constructing a
 is serialized. The class and its dependencies must be available to every worker.
 It participates in the snapshot fingerprint. `withGenerator()` on a regular
 job cannot change the captured class while coalescing is enabled; select it
-before rendering instead. Keep container bindings consistent across renderers
-and workers, including bindings for the default `DocumentGenerator`.
+before rendering instead. Regular jobs that override `generator()` are rejected
+in coalescing mode; configure the snapshot generator instead. The override
+remains available when coalescing is disabled. Keep container bindings consistent
+across renderers and workers, including bindings for the default `DocumentGenerator`.
 
 Work recovered before any explicit dispatch uses the default queue connection
 and queue. A new snapshot rendered while work is pending inherits that work's
