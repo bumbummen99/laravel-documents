@@ -103,7 +103,7 @@ it('releases shared target locks after processing custom jobs with related model
     $user = User::query()->create();
     $storage = new RecordDocumentStorage;
     app(DocumentStorageManager::class)->register('records', fn () => $storage);
-    $rendered = new RenderedDocument('frozen HTML', new DocumentTarget('records', new RecordStorageContext(909)));
+    $rendered = new RenderedDocument('frozen HTML', new DocumentTarget('records', new RecordStorageContext(909)), generator: FakeDocumentGenerator::class);
     $job = $deleteWhenMissingModels
         ? new GenerateDocumentWithRelatedModel($rendered)
         : new GenerateDocumentFailingWithMissingModels($rendered);

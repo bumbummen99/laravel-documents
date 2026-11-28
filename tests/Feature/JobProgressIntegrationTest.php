@@ -15,6 +15,7 @@ use Mateffy\JobProgress\Data\JobStatus;
 use Mateffy\JobProgress\JobProgressConfig;
 use Mateffy\JobProgress\LaravelJobProgressServiceProvider;
 use Mateffy\JobProgress\Traits\Progress;
+use SkyRaptor\LaravelDocuments\DocumentGenerator;
 use SkyRaptor\LaravelDocuments\DocumentTarget;
 use SkyRaptor\LaravelDocuments\Events\DocumentRenderFailed;
 use SkyRaptor\LaravelDocuments\Events\DocumentRendering;
@@ -36,12 +37,14 @@ use SkyRaptor\LaravelDocuments\Tests\Fixtures\IndependentTrackedDocument;
 use SkyRaptor\LaravelDocuments\Tests\Fixtures\InvoiceDocument;
 use SkyRaptor\LaravelDocuments\Tests\Fixtures\QueueTables;
 
-function trackedVersionedExample(int $number): TrackedVersionedDocument
+/** @param class-string<DocumentGenerator> $generator */
+function trackedVersionedExample(int $number, string $generator = FakeDocumentGenerator::class): TrackedVersionedDocument
 {
     return (new TrackedVersionedDocument(new RenderedDocument(
         'HTML',
         new DocumentTarget('fake-versioned', new FilesystemDocumentStorageContext("invoices/{$number}.pdf", 'documents')),
-    )))->withGenerator(FakeDocumentGenerator::class);
+        generator: $generator,
+    )))->withGenerator($generator);
 }
 
 function useDatabaseQueueForProgressTests(): void
@@ -105,7 +108,7 @@ it('tracks each document separately while Laravel tracks the batch', function ()
 
 it('tracks an unversioned unique job without requiring a batch', function () {
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/unique.pdf', 'documents'));
-    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target)))
+    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
         ->withGenerator(FakeDocumentGenerator::class);
     $id = $job->generationId();
 
@@ -121,7 +124,7 @@ it('tracks an unversioned unique job without requiring a batch', function () {
 
 it('allows contract-only custom jobs to reuse the progress integration', function () {
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/independent.pdf', 'documents'));
-    $job = (new IndependentTrackedDocument(new RenderedDocument('HTML', $target)))
+    $job = (new IndependentTrackedDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
         ->withGenerator(FakeDocumentGenerator::class);
 
     $job->handle();
@@ -146,7 +149,7 @@ it('shares unique locks between tracked and untracked jobs', function () {
 it('honours individual cancellation for a tracked unique job', function () {
     Event::fake([DocumentRendering::class]);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/cancelled.pdf', 'documents'));
-    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target)))
+    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
         ->withGenerator(FakeDocumentGenerator::class);
     GenerateUniqueDocumentWithProgress::getProgress($job->generationId(), createIfMissing: true)->cancel();
 
@@ -189,7 +192,7 @@ it('propagates a tracked unique job progress failure after storage', function ()
     Exceptions::fake();
     Event::fake([DocumentStored::class]);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/unique-failure.pdf', 'documents'));
-    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target)))
+    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
         ->withGenerator(FakeDocumentGenerator::class);
 
     expect(fn () => dispatch_sync($job))
@@ -215,7 +218,7 @@ it('preserves upstream handling of a secondary progress failure after storage', 
     Exceptions::fake();
     Event::fake([DocumentStored::class, DocumentRenderFailed::class]);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/report-failure.pdf', 'documents'));
-    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target)))
+    $job = (new GenerateUniqueDocumentWithProgress(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
         ->withGenerator(FakeDocumentGenerator::class);
 
     expect(fn () => $job->handle())
@@ -274,7 +277,7 @@ it('tracks an asynchronously queued batch job', function (bool $cancelled) {
 it('records batch failures separately from the processed-job percentage', function () {
     useDatabaseQueueForProgressTests();
     Exceptions::fake();
-    $job = trackedVersionedExample(10)->withGenerator(FailingDocumentGenerator::class);
+    $job = trackedVersionedExample(10, FailingDocumentGenerator::class);
     $id = $job->generationId();
     $batch = Bus::batch([$job])->allowFailures()->dispatch();
 
@@ -307,7 +310,7 @@ it('keeps an individually cancelled job distinct from its Laravel batch', functi
 it('rethrows rendering errors and records the failed progress', function () {
     Event::fake([DocumentRenderFailed::class, DocumentStored::class]);
     Exceptions::fake();
-    $job = trackedVersionedExample(4)->withGenerator(FailingDocumentGenerator::class);
+    $job = trackedVersionedExample(4, FailingDocumentGenerator::class);
     $id = $job->generationId();
 
     expect(fn () => dispatch_sync($job))->toThrow(RuntimeException::class, 'PDF generation failed')
@@ -373,7 +376,7 @@ it('does not suppress a later rendering failure when a job instance is reused', 
     Exceptions::fake();
     $job = trackedVersionedExample(6);
     $job->handle();
-    $job->withGenerator(FailingDocumentGenerator::class);
+    app()->bind(FakeDocumentGenerator::class, FailingDocumentGenerator::class);
 
     expect(fn () => $job->handle())->toThrow(RuntimeException::class, 'PDF generation failed');
 });

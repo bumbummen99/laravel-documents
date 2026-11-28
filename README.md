@@ -124,11 +124,12 @@ Document -> render() -> RenderedDocument
 Use the focused services when coordinating stages explicitly:
 
 ```php
+use SkyRaptor\LaravelDocuments\DocumentGenerator;
 use SkyRaptor\LaravelDocuments\DocumentPublisher;
 use SkyRaptor\LaravelDocuments\Jobs\DocumentJobFactory;
 
 $rendered = $document->render();
-$generated = app($rendered->generatorClass())->generate($rendered);
+$generated = DocumentGenerator::generate($rendered);
 $version = app(DocumentPublisher::class)->publish($generated);
 ```
 
@@ -145,9 +146,9 @@ It does not retain the rendered HTML. `DocumentPublisher` accepts only that
 generated result and coordinates storage, snapshot-cache updates, and publication
 events; it has no generator dependency. `DocumentJobFactory` creates jobs from
 rendered input. No service is serialized into either result or a job.
-When coalescing is enabled, even a direct `DocumentGenerator::generate()` call
-uses the captured generator resolved from the container. Outside coalescing,
-direct calls use the generator instance on which they are invoked.
+In every mode, `DocumentGenerator::generate()` resolves the captured generator
+once from the container. Call it statically rather than resolving a generator
+first; invoking it through an instance does not select that instance.
 
 `GeneratedDocument` accepts caller-supplied bytes. Publication checks its
 snapshot identity, but cannot verify that those bytes were produced from the
@@ -521,16 +522,15 @@ called. Dispatch requests an immediate wakeup; the queue job contains only its
 target key and worker token, and the worker reads the immutable snapshot from
 the database.
 
-Coalesced recovery resolves the generator class captured in the snapshot. To
+Generation and coalesced recovery resolve the generator class captured in the snapshot. To
 use a custom generator, override `Document::generator()` to return its class
 name, or pass `generator: CustomGenerator::class` when constructing a
 `RenderedDocument`. Only the class-name string is stored; no generator instance
 is serialized. The class and its dependencies must be available to every worker.
 It participates in the snapshot fingerprint. `withGenerator()` on a regular
-job cannot change the captured class while coalescing is enabled; select it
-before rendering instead. Regular jobs that override `generator()` are rejected
-in coalescing mode; configure the snapshot generator instead. The override
-remains available when coalescing is disabled. Keep container bindings consistent
+job can only confirm the captured class, and regular jobs that override
+`generator()` are rejected in all modes; configure the snapshot generator
+instead. Keep container bindings consistent
 across renderers and workers, including bindings for the default `DocumentGenerator`.
 
 Work recovered before any explicit dispatch uses the default queue connection
@@ -692,8 +692,8 @@ argument is omitted or `null`; non-null arguments override only that setting.
 The lower-level `DocumentJobFactory::make()` accepts a snapshot instead; pass
 `job: $document->job()` to preserve the document's job setting when using it
 directly.
-Call `withGenerator(CustomGenerator::class)` on the returned job to select a
-custom generator. Extend `DocumentGenerator` and override
+Select a custom generator before rendering by overriding `Document::generator()`
+or passing `generator:` to `RenderedDocument`. Extend `DocumentGenerator` and override
 `protected generateContents(RenderedDocument $rendered): string` to customize
 the final PDF bytes while preserving generation IDs and events. The `generate()`
 entry point is final and cannot be overridden. Constructor
@@ -802,8 +802,10 @@ read PDF bytes from `contents` and pass that result to `DocumentPublisher::publi
 or `Documents::publish()`. Publication no longer accepts rendered input at the
 low level or regenerates PDF bytes. `DocumentJobFactory` and
 `DocumentSnapshotCache::changed()` still consume rendered input.
-Replace job `withRenderer()` calls with `withGenerator()` and move custom
-byte generation to `generateContents()`. Generation IDs are generation arguments
+Replace job `withRenderer()` and generator overrides with a generator selected
+on the document or rendered snapshot, and move custom byte generation to
+`generateContents()`. `withGenerator()` only accepts the captured class.
+Generation IDs are generation arguments
 and are carried by the generated result, not mutable generator state.
 The `snapshot_cache` configuration and existing event class names are unchanged.
 

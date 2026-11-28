@@ -24,23 +24,21 @@ class DocumentGenerator
     /**
      * Generate once and freeze the final PDF contents and their publication identity.
      */
-    final public function generate(RenderedDocument $rendered, ?string $generationId = null): GeneratedDocument
+    final public static function generate(RenderedDocument $rendered, ?string $generationId = null): GeneratedDocument
     {
         if ($generationId === '') {
             throw new InvalidArgumentException('The generation ID cannot be empty.');
         }
 
         $generationId ??= (string) Str::uuid();
-        $this->dispatchDocumentEvent(new DocumentRendering($rendered->target, $generationId));
+        self::dispatchDocumentEvent(new DocumentRendering($rendered->target, $generationId));
 
         try {
-            $generator = config('laravel-documents.coalescing.enabled')
-                ? app($rendered->generatorClass())
-                : $this;
+            $generator = app($rendered->generatorClass());
 
             return new GeneratedDocument($rendered, $generator->generateContents($rendered), $generationId);
         } catch (Throwable $exception) {
-            $this->dispatchDocumentEvent(new DocumentRenderFailed(
+            self::dispatchDocumentEvent(new DocumentRenderFailed(
                 target: $rendered->target,
                 generationId: $generationId,
                 exceptionClass: $exception::class,

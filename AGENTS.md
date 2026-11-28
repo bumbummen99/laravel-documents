@@ -27,11 +27,11 @@ The `RenderedDocument` is a **finalized**, **immutable** representation of a `Do
 It contains the `Document`'s immutable, *rendered* HTML, document-level PDF metadata, and optional metadata required to identify and process the snapshot. It prevents content drift caused by changes to the `Document`'s underlying data sources after rendering. Document-level PDF metadata participates in the fingerprint and overrides builder metadata; builder-only metadata is not frozen.
 
 The snapshot records the generator's class name, not a generator instance.
-Workers resolve that class through the container; coalesced work must not change
-the selected generator after rendering. Generator identity affects the fingerprint.
-Direct generator calls also resolve the captured class when coalescing is enabled.
-Regular jobs reject `generator()` overrides while coalescing is enabled; select
-the generator on the snapshot instead.
+Generation resolves that class once through the container in every mode; work
+must not change the selected generator after rendering. Generator identity affects
+the fingerprint. Call `DocumentGenerator::generate()` statically rather than
+resolving an instance first. Regular jobs reject conflicting `withGenerator()`
+calls and `generator()` overrides; select the generator on the snapshot instead.
 
 PDF *generation* should only accept a previously *rendered* `RenderedDocument`.
 
@@ -69,7 +69,8 @@ PDF generation must consume a previously rendered `RenderedDocument`. The render
 
 The *generation* of the PDF file can be done in sync or be dispatched to the Queue using a Job that implements the `GenerateDocument` Contract.
 
-`DocumentGenerator::generate(RenderedDocument $rendered)` produces an immutable,
+`DocumentGenerator::generate(RenderedDocument $rendered)` resolves the captured
+generator and produces an immutable,
 serializable `GeneratedDocument` containing final post-processed PDF `contents`,
 the target, the rendered fingerprint, and a generation ID, without retaining HTML.
 Its `generate()` method is final; customize PDF bytes through `generateContents()`.

@@ -105,6 +105,21 @@ it('emits a failure event and rethrows a rendering failure', function () {
         ->and(serialize($failed))->not->toContain('<h1>Private invoice</h1>');
 });
 
+it('emits a failure event when the captured generator cannot be resolved', function () {
+    Event::fake([DocumentRendering::class, DocumentRenderFailed::class]);
+    $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/resolution-failure.pdf', 'documents'));
+    $snapshot = new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class);
+    app()->bind(FakeDocumentGenerator::class, fn () => throw new RuntimeException('Generator resolution failed.'));
+
+    expect(fn () => DocumentGenerator::generate($snapshot, 'resolution-id'))
+        ->toThrow(RuntimeException::class, 'Generator resolution failed.');
+
+    Event::assertDispatchedOnce(DocumentRendering::class);
+    Event::assertDispatched(DocumentRenderFailed::class, fn (DocumentRenderFailed $event) => $event->target === $target
+        && $event->generationId === 'resolution-id'
+        && $event->message === 'Generator resolution failed.');
+});
+
 it('emits a failure event and rethrows a storage failure', function () {
     Event::fake([DocumentRendering::class, DocumentStored::class, DocumentRenderFailed::class]);
     $storage = Mockery::mock(DocumentStorage::class);
@@ -123,7 +138,7 @@ it('emits a failure event and rethrows a storage failure', function () {
 it('keeps the generation id across queued job serialization and retries', function () {
     Event::fake([DocumentRendering::class, DocumentStored::class, DocumentRenderFailed::class]);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/46.pdf', 'documents'));
-    $rendered = new RenderedDocument('HTML', $target);
+    $rendered = new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class);
     $job = (new GenerateUniqueDocument($rendered))->withGenerator(FakeDocumentGenerator::class);
     $id = $job->generationId();
 
@@ -143,16 +158,10 @@ it('keeps the generation id across queued job serialization and retries', functi
         ->not->toBe((new GenerateVersionedDocument($rendered))->generationId());
 });
 
-it('retains the job generation id when a job overrides its generator', function () {
+it('retains the job generation id with a captured custom generator', function () {
     Event::fake([DocumentRendering::class, DocumentStored::class, DocumentRenderFailed::class]);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/46.pdf', 'documents'));
-    $job = new class(new RenderedDocument('HTML', $target)) extends GenerateUniqueDocument
-    {
-        protected function generator(): DocumentGenerator
-        {
-            return app(FakeDocumentGenerator::class);
-        }
-    };
+    $job = new GenerateUniqueDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class));
 
     $job->handle();
 
@@ -162,21 +171,17 @@ it('retains the job generation id when a job overrides its generator', function 
 it('uses one generation id when a failed attempt is retried successfully', function () {
     Event::fake([DocumentRendering::class, DocumentStored::class, DocumentRenderFailed::class]);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/42.pdf', 'documents'));
-    $job = new class(new RenderedDocument('HTML', $target)) extends GenerateUniqueDocument
-    {
-        private bool $hasFailed = false;
+    $hasFailed = false;
+    app()->bind(DocumentGenerator::class, function () use (&$hasFailed): DocumentGenerator {
+        if (! $hasFailed) {
+            $hasFailed = true;
 
-        protected function generator(): DocumentGenerator
-        {
-            if (! $this->hasFailed) {
-                $this->hasFailed = true;
-
-                return app(FailingDocumentGenerator::class);
-            }
-
-            return app(FakeDocumentGenerator::class);
+            return app(FailingDocumentGenerator::class);
         }
-    };
+
+        return app(FakeDocumentGenerator::class);
+    });
+    $job = new GenerateUniqueDocument(new RenderedDocument('HTML', $target));
 
     expect(fn () => $job->handle())->toThrow(RuntimeException::class, 'PDF generation failed');
     $job->handle();
@@ -271,7 +276,7 @@ it('does not fail a queued document job when a stored listener throws', function
     $listenerError = new Error('Listener failed after storage');
     Event::listen(DocumentStored::class, fn () => throw $listenerError);
     $target = new DocumentTarget('disk', new FilesystemDocumentStorageContext('invoices/47.pdf', 'documents'));
-    $job = (new GenerateUniqueDocument(new RenderedDocument('HTML', $target)))
+    $job = (new GenerateUniqueDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))
         ->withGenerator(FakeDocumentGenerator::class);
 
     dispatch_sync($job);

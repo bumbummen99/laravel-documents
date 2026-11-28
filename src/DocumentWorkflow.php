@@ -15,7 +15,6 @@ use SkyRaptor\LaravelDocuments\Jobs\DocumentJobFactory;
 class DocumentWorkflow
 {
     public function __construct(
-        private readonly DocumentGenerator $generator,
         private readonly DocumentPublisher $publisher,
         private readonly DocumentJobFactory $jobs,
     ) {}
@@ -26,10 +25,8 @@ class DocumentWorkflow
     public function generate(Document|RenderedDocument $document, ?string $generationId = null): GeneratedDocument
     {
         $rendered = $document instanceof Document ? $document->render() : $document;
-        $generator = $rendered->generatorClass();
 
-        return ($generator === DocumentGenerator::class ? $this->generator : app($generator))
-            ->generate($rendered, $generationId);
+        return DocumentGenerator::generate($rendered, $generationId);
     }
 
     /**

@@ -32,7 +32,6 @@ use Throwable;
 final class DocumentCoalescer
 {
     public function __construct(
-        private readonly DocumentGenerator $generator,
         private readonly DocumentPublisher $publisher,
         private readonly DocumentStorageManager $storage,
     ) {}
@@ -398,9 +397,7 @@ final class DocumentCoalescer
                 $storage = $this->storage->resolve($rendered->target->storage);
 
                 if ($row->published_fingerprint !== $rendered->fingerprint() || ! $storage->exists($rendered->target->context)) {
-                    $generatorClass = $rendered->generatorClass();
-                    $generator = $generatorClass === DocumentGenerator::class ? $this->generator : app($generatorClass);
-                    $this->publisher->publishCoalescedAttempt($generator->generate($rendered), $token);
+                    $this->publisher->publishCoalescedAttempt(DocumentGenerator::generate($rendered), $token);
                 }
             }
 

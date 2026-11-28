@@ -79,6 +79,7 @@ it('reads the stored pdf file without rendering the view', function () {
 
 it('detects changes against the last stored render', function () {
     $document = new InvoiceDocument(3);
+    app()->bind(DocumentGenerator::class, FakeDocumentGenerator::class);
     $rendered = $document->render();
 
     expect(app(DocumentSnapshotCache::class)->changed($rendered))->toBeTrue();
@@ -123,7 +124,14 @@ it('can serialize a queued job with the snapshot and storage identifier', functi
 });
 
 it('can serialize the selected generator class on a queued job', function () {
-    $rendered = (new InvoiceDocument(14))->render();
+    $document = new class(14) extends InvoiceDocument
+    {
+        public function generator(): string
+        {
+            return FakeDocumentGenerator::class;
+        }
+    };
+    $rendered = $document->render();
     $job = app(DocumentJobFactory::class)->make($rendered)->withGenerator(FakeDocumentGenerator::class);
     $restored = unserialize(serialize($job));
 

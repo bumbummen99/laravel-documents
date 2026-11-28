@@ -103,7 +103,7 @@ abstract class AbstractGenerateDocument implements GenerateDocument
     }
 
     /**
-     * Select the generator class to re-create when the job runs.
+     * Confirm the generator class captured by the snapshot.
      *
      * @param  class-string  $generator
      */
@@ -113,8 +113,8 @@ abstract class AbstractGenerateDocument implements GenerateDocument
             throw new InvalidArgumentException('The generator must extend '.DocumentGenerator::class.'.');
         }
 
-        if (config('laravel-documents.coalescing.enabled') && $generator !== $this->rendered->generatorClass()) {
-            throw new InvalidArgumentException('The job generator must match the coalesced snapshot generator.');
+        if ($generator !== $this->rendered->generatorClass()) {
+            throw new InvalidArgumentException('The job generator must match the snapshot generator.');
         }
 
         $this->generatorClass = $generator;
@@ -142,17 +142,15 @@ abstract class AbstractGenerateDocument implements GenerateDocument
      */
     public function generate(): ?string
     {
-        if (config('laravel-documents.coalescing.enabled')) {
-            if ($this->generatorClass !== $this->rendered->generatorClass()) {
-                throw new InvalidArgumentException('The job generator must match the coalesced snapshot generator.');
-            }
-
-            if ((new ReflectionMethod($this, 'generator'))->getDeclaringClass()->getName() !== self::class) {
-                throw new InvalidArgumentException('A coalesced job cannot override generator resolution; select the generator on the snapshot.');
-            }
+        if ($this->generatorClass !== $this->rendered->generatorClass()) {
+            throw new InvalidArgumentException('The job generator must match the snapshot generator.');
         }
 
-        $generated = $this->generator()->generate($this->rendered, $this->generationId());
+        if ((new ReflectionMethod($this, 'generator'))->getDeclaringClass()->getName() !== self::class) {
+            throw new InvalidArgumentException('A document job cannot override generator resolution; select the generator on the snapshot.');
+        }
+
+        $generated = DocumentGenerator::generate($this->rendered, $this->generationId());
         $this->version = app(DocumentPublisher::class)->publish($generated);
         $this->generated = true;
 

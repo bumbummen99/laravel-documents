@@ -137,6 +137,40 @@ it('recovers the generator captured with the snapshot before dispatch', function
     });
 });
 
+it('resolves the captured generator binding once per coalesced generation', function (string $path, string $generatorClass) {
+    withRealVersionedStorage(function () use ($path, $generatorClass) {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('queue.default', 'database');
+        $resolutions = 0;
+        app()->bind($generatorClass, function () use (&$resolutions): DocumentGenerator {
+            $resolutions++;
+
+            return app(HtmlDocumentGenerator::class);
+        });
+        $context = new FilesystemDocumentStorageContext('invoices/resolution.pdf', 'documents');
+        $snapshot = new RenderedDocument('captured bytes', new DocumentTarget('versioned', $context), latestSnapshotWins: true, generator: $generatorClass);
+
+        expect($resolutions)->toBe(0);
+
+        if ($path === 'direct') {
+            Documents::publish(DocumentGenerator::generate($snapshot));
+        } elseif ($path === 'workflow') {
+            Documents::publish($snapshot);
+        } elseif ($path === 'job') {
+            Documents::makeJob($snapshot)->handle();
+        } else {
+            $this->artisan('documents:recover')->assertSuccessful();
+            $this->artisan('queue:work', ['connection' => 'database', '--once' => true])->assertSuccessful();
+        }
+
+        expect($resolutions)->toBe(1)
+            ->and((new VersionedDocumentStorage)->get($context))->toBe('captured bytes')
+            ->and(Documents::targetStatus($snapshot->target))->toBe(DocumentTargetStatus::Published);
+    });
+})->with(['direct', 'workflow', 'job', 'recovery'])
+    ->with([DocumentGenerator::class, FakeDocumentGenerator::class]);
+
 it('rejects invalid snapshot generators without recording pending work', function () {
     withRealVersionedStorage(function () {
         createCoalescingTables();
@@ -837,8 +871,8 @@ it('tracks queued batch jobs while storing real document versions', function () 
         $storage = new VersionedDocumentStorage;
         $context = new FilesystemDocumentStorageContext('invoices/42.pdf', 'documents');
         $target = new DocumentTarget('versioned', $context);
-        $firstSnapshot = new RenderedDocument('first', $target);
-        $secondSnapshot = new RenderedDocument('second', $target);
+        $firstSnapshot = new RenderedDocument('first', $target, generator: FakeDocumentGenerator::class);
+        $secondSnapshot = new RenderedDocument('second', $target, generator: FakeDocumentGenerator::class);
         $first = (new TrackedVersionedDocument($firstSnapshot))->withGenerator(FakeDocumentGenerator::class);
         $second = (new TrackedVersionedDocument($secondSnapshot))->withGenerator(FakeDocumentGenerator::class);
         $firstId = $first->generationId();
@@ -893,8 +927,8 @@ it('makes the last published version current regardless of job creation order', 
     withRealVersionedStorage(function () {
         $context = new FilesystemDocumentStorageContext('invoices/order.pdf', 'documents');
         $target = new DocumentTarget('versioned', $context);
-        $firstSnapshot = new RenderedDocument('first-created', $target);
-        $secondSnapshot = new RenderedDocument('second-created', $target);
+        $firstSnapshot = new RenderedDocument('first-created', $target, generator: HtmlDocumentGenerator::class);
+        $secondSnapshot = new RenderedDocument('second-created', $target, generator: HtmlDocumentGenerator::class);
         $first = (new GenerateVersionedDocument($firstSnapshot))->withGenerator(HtmlDocumentGenerator::class);
         $second = (new GenerateVersionedDocument($secondSnapshot))->withGenerator(HtmlDocumentGenerator::class);
 
@@ -1631,7 +1665,7 @@ it('keeps older version directories and their legacy hash files readable', funct
             },
         );
         $target = new DocumentTarget('versioned', $context);
-        $job = (new GenerateVersionedDocument(new RenderedDocument('new PDF', $target)))->withGenerator(HtmlDocumentGenerator::class);
+        $job = (new GenerateVersionedDocument(new RenderedDocument('new PDF', $target, generator: HtmlDocumentGenerator::class)))->withGenerator(HtmlDocumentGenerator::class);
         $job->handle();
         $storage = new VersionedDocumentStorage;
 
@@ -1648,7 +1682,7 @@ it('rejects synchronous database-backed batches with real versioned storage', fu
         $storage = new VersionedDocumentStorage;
         $context = new FilesystemDocumentStorageContext('invoices/42.pdf', 'documents');
         $target = new DocumentTarget('versioned', $context);
-        $job = (new TrackedVersionedDocument(new RenderedDocument('HTML', $target)))->withGenerator(FakeDocumentGenerator::class);
+        $job = (new TrackedVersionedDocument(new RenderedDocument('HTML', $target, generator: FakeDocumentGenerator::class)))->withGenerator(FakeDocumentGenerator::class);
 
         expect(fn () => Bus::batch([$job])->dispatch())
             ->toThrow(RuntimeException::class, 'Uploads cannot run inside a metadata transaction.');
