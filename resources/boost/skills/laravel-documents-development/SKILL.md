@@ -107,6 +107,14 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   missing PDF is regenerated. Successful publication or synchronous reuse clears
   matching pending work, not newer snapshots. Recovery attempts other targets
   and stages after individual failures, then rethrows the first error.
+- To observe coalesced targets, migrate the target-events table and enable
+  `coalescing.record_target_events` on workers and schedulers. Read
+  `Documents::targetEventCursor($target)` and `Documents::targetEvents($target,
+  $cursor)` only after application authorization. Attempt failures are
+  observed exceptions; an expired lease means uncertain recovery, not confirmed
+  failure. Database outages and abrupt process termination can prevent event
+  recording. Events are retained until the application prunes them; do not
+  assume exactly-once events or notifications.
 - `Documents::tombstoneTarget($target)` fences existing snapshots and rejects
   registrations until `Documents::restoreTarget($target)`. Both can participate
   in a Laravel-managed transaction on the shared metadata connection. Neither

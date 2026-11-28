@@ -82,6 +82,7 @@ class LaravelDocumentsServiceProvider extends ServiceProvider
 
         $this->publishes([
             __DIR__.'/../database/migrations/2026_11_27_105147_create_document_coalescing_tables.php' => database_path('migrations/2026_11_27_105147_create_document_coalescing_tables.php'),
+            __DIR__.'/../database/migrations/2026_11_28_000000_create_document_target_events_table.php' => database_path('migrations/2026_11_28_000000_create_document_target_events_table.php'),
         ], 'laravel-documents-migrations');
         $this->commands([RecoverDocuments::class]);
     }

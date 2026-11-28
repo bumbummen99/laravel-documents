@@ -26,6 +26,7 @@ it('merges the package configuration', function () {
         'latest_snapshot_wins' => false,
         'coalescing' => [
             'enabled' => false,
+            'record_target_events' => false,
             'connection' => null,
             'lease_seconds' => 300,
             'stage_retention_seconds' => 3600,
@@ -119,12 +120,18 @@ it('publishes only the package configuration', function () {
         ->and(array_values($paths))->toBe([config_path('laravel-documents.php')]);
 });
 
-it('publishes the coalescing tables migration', function () {
+it('publishes the coalescing and target event migrations', function () {
     $paths = ServiceProvider::pathsToPublish(LaravelDocumentsServiceProvider::class, 'laravel-documents-migrations');
 
-    expect($paths)->toHaveCount(1)
-        ->and(array_map('realpath', array_keys($paths)))->toBe([realpath(__DIR__.'/../../database/migrations/2026_11_27_105147_create_document_coalescing_tables.php')])
-        ->and(array_values($paths))->toBe([database_path('migrations/2026_11_27_105147_create_document_coalescing_tables.php')]);
+    expect($paths)->toHaveCount(2)
+        ->and(array_map('realpath', array_keys($paths)))->toBe([
+            realpath(__DIR__.'/../../database/migrations/2026_11_27_105147_create_document_coalescing_tables.php'),
+            realpath(__DIR__.'/../../database/migrations/2026_11_28_000000_create_document_target_events_table.php'),
+        ])
+        ->and(array_values($paths))->toBe([
+            database_path('migrations/2026_11_27_105147_create_document_coalescing_tables.php'),
+            database_path('migrations/2026_11_28_000000_create_document_target_events_table.php'),
+        ]);
 });
 
 it('does not register a placeholder command', function () {

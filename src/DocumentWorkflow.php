@@ -111,6 +111,17 @@ class DocumentWorkflow
         return app(DocumentCoalescer::class)->status($target);
     }
 
+    /** @return list<DocumentTargetEvent> */
+    public function targetEvents(DocumentTarget $target, int $after = 0): array
+    {
+        return app(DocumentCoalescer::class)->targetEvents($target, $after);
+    }
+
+    public function targetEventCursor(DocumentTarget $target): int
+    {
+        return app(DocumentCoalescer::class)->targetEventCursor($target);
+    }
+
     public function tombstoneTarget(DocumentTarget $target): void
     {
         app(DocumentCoalescer::class)->tombstone($target);

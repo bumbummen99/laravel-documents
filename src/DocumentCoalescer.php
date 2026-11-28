@@ -106,6 +106,65 @@ final class DocumentCoalescer
         return DocumentTargetStatus::NotScheduled;
     }
 
+    /** @return list<DocumentTargetEvent> */
+    public function targetEvents(DocumentTarget $target, int $after = 0): array
+    {
+        $this->assertEnabled();
+        $this->assertTarget($target);
+
+        if ($after < 0) {
+            throw new InvalidArgumentException('A target event cursor cannot be negative.');
+        }
+
+        if (config('laravel-documents.coalescing.record_target_events') !== true) {
+            throw new LogicException('Document target event recording is disabled.');
+        }
+
+        return array_values($this->connection()->table('document_target_events')->useWritePdo()
+            ->where('target_key', $this->key($target))->where('id', '>', $after)
+            ->orderBy('id')->get()->map(fn (stdClass $row): DocumentTargetEvent => new DocumentTargetEvent(
+                (int) $row->id,
+                DocumentTargetEventType::from($row->type),
+            ))->all());
+    }
+
+    public function targetEventCursor(DocumentTarget $target): int
+    {
+        $this->assertEnabled();
+        $this->assertTarget($target);
+
+        if (config('laravel-documents.coalescing.record_target_events') !== true) {
+            throw new LogicException('Document target event recording is disabled.');
+        }
+
+        return (int) $this->connection()->table('document_target_events')->useWritePdo()
+            ->where('target_key', $this->key($target))->max('id');
+    }
+
+    public function recordFailedAttempt(string $key, string $token): void
+    {
+        if (config('laravel-documents.coalescing.record_target_events') !== true) {
+            return;
+        }
+        $connection = $this->connection();
+        MetadataTransaction::run($connection, function () use ($connection, $key, $token): void {
+            $row = $this->lockTarget($connection, $key);
+
+            if ($row->worker_token === $token && $row->pending !== null && ! $row->tombstoned) {
+                $this->recordTargetEvent($connection, $key, DocumentTargetEventType::AttemptFailed);
+            }
+        }, 5);
+    }
+
+    private function recordTargetEvent(Connection $connection, string $key, DocumentTargetEventType $type): void
+    {
+        $connection->table('document_target_events')->insert([
+            'target_key' => $key,
+            'type' => $type->value,
+            'created_at' => now(),
+        ]);
+    }
+
     public function existingPublication(RenderedDocument $rendered): ?DocumentPublicationResult
     {
         $this->assertEnabled();
@@ -441,6 +500,10 @@ final class DocumentCoalescer
 
                     if (! is_string($row->worker_token) || $row->worker_token === '') {
                         throw new RuntimeException('Pending coalesced work is missing its worker token.');
+                    }
+
+                    if ($row->lease_until !== null && config('laravel-documents.coalescing.record_target_events') === true) {
+                        $this->recordTargetEvent($connection, $key, DocumentTargetEventType::RecoveryDelayed);
                     }
                     $token = $row->worker_token;
                     $connection->table('document_coalescing_targets')->where('target_key', $key)

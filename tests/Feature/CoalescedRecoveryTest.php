@@ -18,9 +18,11 @@ use SkyRaptor\LaravelDocuments\DocumentGenerator;
 use SkyRaptor\LaravelDocuments\DocumentPublicationStatus;
 use SkyRaptor\LaravelDocuments\Documents\Document;
 use SkyRaptor\LaravelDocuments\DocumentTarget;
+use SkyRaptor\LaravelDocuments\DocumentTargetEventType;
 use SkyRaptor\LaravelDocuments\DocumentTargetStatus;
 use SkyRaptor\LaravelDocuments\Facades\Documents;
 use SkyRaptor\LaravelDocuments\GeneratedDocument;
+use SkyRaptor\LaravelDocuments\Jobs\GenerateCoalescedDocument;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateVersionedDocument;
 use SkyRaptor\LaravelDocuments\RenderedDocument;
 use SkyRaptor\LaravelDocuments\Storage\Contexts\DocumentStorageContext;
@@ -46,6 +48,39 @@ beforeEach(function () {
     $this->app->forgetInstance('encrypter');
     Crypt::clearResolvedInstance('encrypter');
     Storage::fake('documents');
+});
+
+it('records failed attempts and uncertain lease recovery separately from pending target state', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        (require dirname(__DIR__, 2).'/database/migrations/2026_11_28_000000_create_document_target_events_table.php')->up();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('laravel-documents.coalescing.record_target_events', true);
+        Config::set('queue.default', 'database');
+        $target = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/feedback.pdf', 'documents'));
+        $snapshot = new RenderedDocument('pending', $target, latestSnapshotWins: true);
+        Documents::dispatchCoalesced($snapshot);
+        $row = DB::table('document_coalescing_targets')->first();
+        $job = new GenerateCoalescedDocument($row->target_key, $row->worker_token);
+        $this->app->bind(DocumentGenerator::class, fn () => throw new RuntimeException('generator unavailable'));
+
+        expect(fn () => $job->handle(app(DocumentCoalescer::class)))
+            ->toThrow(RuntimeException::class, 'generator unavailable');
+        $events = Documents::targetEvents($target);
+        expect($events)->toHaveCount(1)
+            ->and($events[0]->type)->toBe(DocumentTargetEventType::AttemptFailed)
+            ->and(Documents::targetEventCursor($target))->toBe($events[0]->id)
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+        DB::table('document_coalescing_targets')->update(['lease_until' => now()->subMinute()]);
+        app(DocumentCoalescer::class)->recover();
+        $later = Documents::targetEvents($target, $events[0]->id);
+        expect($later)->toHaveCount(1)
+            ->and($later[0]->type)->toBe(DocumentTargetEventType::RecoveryDelayed)
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+        $other = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/other.pdf', 'documents'));
+        expect(Documents::targetEvents($other))->toBe([])
+            ->and(Documents::targetEventCursor($other))->toBe(0);
+    });
 });
 
 it('rolls back a failed publication commit and leaves its stage recoverable', function () {

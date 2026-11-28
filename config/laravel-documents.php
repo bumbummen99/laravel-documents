@@ -8,6 +8,7 @@ return [
 
     'coalescing' => [
         'enabled' => false,
+        'record_target_events' => false,
         'connection' => null,
         'lease_seconds' => 300,
         'stage_retention_seconds' => 3600,

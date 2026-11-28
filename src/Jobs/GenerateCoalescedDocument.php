@@ -9,6 +9,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use SkyRaptor\LaravelDocuments\DocumentCoalescer;
+use Throwable;
 
 final class GenerateCoalescedDocument implements ShouldQueue
 {
@@ -20,6 +21,16 @@ final class GenerateCoalescedDocument implements ShouldQueue
 
     public function handle(DocumentCoalescer $coalescer): void
     {
-        $coalescer->work($this->targetKey, $this->token);
+        try {
+            $coalescer->work($this->targetKey, $this->token);
+        } catch (Throwable $exception) {
+            try {
+                $coalescer->recordFailedAttempt($this->targetKey, $this->token);
+            } catch (Throwable $recordingFailure) {
+                report($recordingFailure);
+            }
+
+            throw $exception;
+        }
     }
 }

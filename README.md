@@ -513,6 +513,23 @@ Schedule::command('laravel-versioned-storage:cleanup')->everyMinute();
 superseded before it could be recorded, or `true` when it was accepted.
 Dispatch errors throw even though the recorded request remains recoverable.
 
+For optional target feedback, publish and run the target-events migration on the
+coalescing connection, then enable `coalescing.record_target_events` in every
+worker and scheduler. `Documents::targetEventCursor($target)` returns the
+current cursor; `Documents::targetEvents($target, $cursor)` returns later
+events in order. `AttemptFailed` records an exception observed by a coalesced
+job while its target remains pending. `RecoveryDelayed` records recovery of an
+expired lease, which can reflect queue delay or a still-running worker, not
+proof of failure. Neither represents a terminal target state.
+
+Events are retained until the application removes them; do not prune events
+while subscribers still need them. A terminated worker cannot record its own
+death, and a database outage can prevent recording an observed failure. A
+recording error is reported without replacing the original job exception.
+Recovery can later record uncertainty after the database is available. Event
+history and notifications are not exactly-once. Applications must authorize
+access to each target before reading its state or history.
+
 Dispatch accepts only a `RenderedDocument`. Rendering registers its ordering
 marker and pending snapshot together in one database transaction. If the caller
 crashes after that commit but before dispatch, the scheduler recovers the latest
