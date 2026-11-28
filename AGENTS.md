@@ -26,6 +26,10 @@ The `RenderedDocument` is a **finalized**, **immutable** representation of a `Do
 
 It contains the `Document`'s immutable, *rendered* HTML, document-level PDF metadata, and optional metadata required to identify and process the snapshot. It prevents content drift caused by changes to the `Document`'s underlying data sources after rendering. Document-level PDF metadata participates in the fingerprint and overrides builder metadata; builder-only metadata is not frozen.
 
+The snapshot records the generator's class name, not a generator instance.
+Workers resolve that class through the container; coalesced work must not change
+the selected generator after rendering. Generator identity affects the fingerprint.
+
 PDF *generation* should only accept a previously *rendered* `RenderedDocument`.
 
 The `RenderedDocument` must be serializable so it can easily be passed to another execution context, such as a queue worker. *Rendering* itself is performed in the current context while *generating* the PDF file can be performed synchronously or asynchronously.

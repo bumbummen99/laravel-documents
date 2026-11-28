@@ -89,10 +89,14 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   `laravel-documents.coalescing.enabled` and `latest_snapshot_wins`, and use
   versioned storage for all snapshots. Call `Documents::dispatchCoalesced($document->render(),
   connection: 'redis', queue: 'pdf')`; unlike `makeJob()`, this dispatches.
-  Schedule `documents:recover` every minute and run queue workers. Avoid calling
-  coalescing operations inside database transactions.
+  Schedule `documents:recover` and `laravel-versioned-storage:cleanup`, and run
+  queue workers. The latter reclaims interrupted uploads that were not yet in
+  the document stage journal. Avoid coalescing operations inside transactions.
 - Dispatch only a `RenderedDocument`. Rendering atomically registers its
   marker and recoverable pending snapshot, even for synchronous generation.
+  Set a custom generator on `Document::generator()` or the snapshot constructor
+  before rendering. Only its class-name string is captured and fingerprinted;
+  workers resolve the instance. Coalesced jobs reject conflicting overrides.
   Recovery can queue it without explicit dispatch, using the default queue if
   none was selected. Use `$document->html()` for HTML-only previews and secure
   the application route. Concurrent synchronous and queued generation can

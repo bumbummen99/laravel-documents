@@ -499,6 +499,7 @@ Documents::dispatchCoalesced($snapshot, connection: 'redis', queue: 'pdf');
 
 // Schedule the recovery command in the application's console routes:
 Schedule::command('documents:recover')->everyMinute();
+Schedule::command('laravel-versioned-storage:cleanup')->everyMinute();
 ```
 
 `dispatchCoalesced()` returns `false` if that rendered snapshot was already
@@ -513,6 +514,16 @@ therefore requests eventual stored-PDF generation even when dispatch is never
 called. Dispatch requests an immediate wakeup; the queue job contains only its
 target key and worker token, and the worker reads the immutable snapshot from
 the database.
+
+Coalesced recovery resolves the generator class captured in the snapshot. To
+use a custom generator, override `Document::generator()` to return its class
+name, or pass `generator: CustomGenerator::class` when constructing a
+`RenderedDocument`. Only the class-name string is stored; no generator instance
+is serialized. The class and its dependencies must be available to every worker.
+It participates in the snapshot fingerprint. `withGenerator()` on a regular
+job cannot change the captured class while coalescing is enabled; select it
+before rendering instead. Keep container bindings consistent across renderers
+and workers, including bindings for the default `DocumentGenerator`.
 
 Work recovered before any explicit dispatch uses the default queue connection
 and queue. A new snapshot rendered while work is pending inherits that work's
@@ -538,6 +549,9 @@ once. Recovery keeps existing wakeups valid even when queue delay exceeds the
 lease; overlapping workers can consequently process the same snapshot.
 Queue connection and name for recovery follow the latest pending request.
 Coalesced jobs do not implement the optional progress integration or batches.
+Also schedule Versioned Storage's cleanup command: it reclaims interrupted
+uploads that crashed before the document stage journal was recorded, as well
+as retired versions. Its own upload deadlines and cleanup grace apply.
 
 Synchronous `publishWithResult()` uses the same database ordering and staged
 publication, but rendering its snapshot also records recoverable queue work.

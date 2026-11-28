@@ -25,10 +25,11 @@ class DocumentWorkflow
      */
     public function generate(Document|RenderedDocument $document, ?string $generationId = null): GeneratedDocument
     {
-        return $this->generator->generate(
-            $document instanceof Document ? $document->render() : $document,
-            $generationId,
-        );
+        $rendered = $document instanceof Document ? $document->render() : $document;
+        $generator = $rendered->generatorClass();
+
+        return ($generator === DocumentGenerator::class ? $this->generator : app($generator))
+            ->generate($rendered, $generationId);
     }
 
     /**

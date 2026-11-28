@@ -35,10 +35,12 @@ final readonly class RenderedDocument
         ?bool $latestSnapshotWins = null,
         ?string $registeredSnapshotId = null,
         public ?DocumentMetadata $metadata = null,
+        public ?string $generator = null,
     ) {
         if ($driver === '') {
             throw new InvalidArgumentException('The document PDF driver configuration cannot be empty.');
         }
+        $this->generatorClass();
 
         $latestSnapshotWins ??= config('laravel-documents.latest_snapshot_wins', false);
 
@@ -57,22 +59,39 @@ final readonly class RenderedDocument
 
         $this->snapshotId = $registeredSnapshotId ?? ($latestSnapshotWins
             ? (config('laravel-documents.coalescing.enabled')
-                ? app(DocumentCoalescer::class)->capture($this->html, $this->target, $this->driver, $this->metadata)
+                ? app(DocumentCoalescer::class)->capture($this->html, $this->target, $this->driver, $this->metadata, $this->generatorClass())
                 : app(DocumentSnapshotCache::class)->register($this->target, $this->fingerprint()))
             : null);
     }
 
     public function fingerprint(): string
     {
-        return self::fingerprintFor($this->html, $this->target, $this->driver, $this->metadata ?? null);
+        return self::fingerprintFor($this->html, $this->target, $this->driver, $this->metadata ?? null, $this->generatorClass());
     }
 
-    public static function fingerprintFor(string $html, DocumentTarget $target, string $driver, ?DocumentMetadata $metadata = null): string
+    /** @return class-string<DocumentGenerator> */
+    public function generatorClass(): string
+    {
+        $generator = $this->generator ?? DocumentGenerator::class;
+
+        if (! is_a($generator, DocumentGenerator::class, true)) {
+            throw new InvalidArgumentException('The document generator must extend '.DocumentGenerator::class.'.');
+        }
+
+        return $generator;
+    }
+
+    /** @param class-string<DocumentGenerator> $generator */
+    public static function fingerprintFor(string $html, DocumentTarget $target, string $driver, ?DocumentMetadata $metadata = null, string $generator = DocumentGenerator::class): string
     {
         $identity = [$html, $target, $driver];
 
         if ($metadata !== null) {
             $identity[] = $metadata->toArray();
+        }
+
+        if ($generator !== DocumentGenerator::class) {
+            $identity[] = ['generator' => $generator];
         }
 
         return hash('sha256', serialize($identity));

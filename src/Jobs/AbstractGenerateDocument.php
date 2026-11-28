@@ -59,6 +59,7 @@ abstract class AbstractGenerateDocument implements GenerateDocument
          */
         protected RenderedDocument $rendered,
     ) {
+        $this->generatorClass = $rendered->generatorClass();
         $this->documentGenerationId = $this->generationId = (string) Str::uuid();
     }
 
@@ -111,6 +112,10 @@ abstract class AbstractGenerateDocument implements GenerateDocument
             throw new InvalidArgumentException('The generator must extend '.DocumentGenerator::class.'.');
         }
 
+        if (config('laravel-documents.coalescing.enabled') && $generator !== $this->rendered->generatorClass()) {
+            throw new InvalidArgumentException('The job generator must match the coalesced snapshot generator.');
+        }
+
         $this->generatorClass = $generator;
 
         return $this;
@@ -148,6 +153,10 @@ abstract class AbstractGenerateDocument implements GenerateDocument
      */
     protected function generator(): DocumentGenerator
     {
+        if (config('laravel-documents.coalescing.enabled') && $this->generatorClass !== $this->rendered->generatorClass()) {
+            throw new InvalidArgumentException('The job generator must match the coalesced snapshot generator.');
+        }
+
         return app($this->generatorClass);
     }
 

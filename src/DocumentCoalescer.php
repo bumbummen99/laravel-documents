@@ -20,6 +20,7 @@ use SkyRaptor\LaravelDocuments\Storage\Contexts\FilesystemDocumentStorageContext
 use SkyRaptor\LaravelDocuments\Storage\Contracts\DocumentStorage;
 use SkyRaptor\LaravelDocuments\Storage\DocumentStorageManager;
 use SkyRaptor\LaravelDocuments\Storage\VersionedDocumentStorage;
+use SkyRaptor\LaravelVersionedStorage\Database\MetadataTransaction;
 use SkyRaptor\LaravelVersionedStorage\VersionedStorage;
 use SkyRaptor\LaravelVersionedStorage\VersionedStorageHandler;
 use stdClass;
@@ -36,14 +37,15 @@ final class DocumentCoalescer
         private readonly DocumentStorageManager $storage,
     ) {}
 
-    public function capture(string $html, DocumentTarget $target, string $driver, ?DocumentMetadata $metadata = null): string
+    /** @param class-string<DocumentGenerator> $generator */
+    public function capture(string $html, DocumentTarget $target, string $driver, ?DocumentMetadata $metadata = null, string $generator = DocumentGenerator::class): string
     {
         $this->assertTarget($target);
         $connection = $this->connection();
         $this->assertOutsideTransaction($connection);
-        $fingerprint = RenderedDocument::fingerprintFor($html, $target, $driver, $metadata);
+        $fingerprint = RenderedDocument::fingerprintFor($html, $target, $driver, $metadata, $generator);
 
-        return $connection->transaction(function () use ($connection, $html, $target, $driver, $fingerprint, $metadata): string {
+        return MetadataTransaction::run($connection, function () use ($connection, $html, $target, $driver, $fingerprint, $metadata, $generator): string {
             $key = $this->key($target);
             $row = $this->lockTarget($connection, $key);
 
@@ -54,7 +56,7 @@ final class DocumentCoalescer
             $snapshot = $row->latest_fingerprint === $fingerprint && is_string($row->latest_snapshot)
                 ? $row->latest_snapshot
                 : (string) Str::uuid();
-            $rendered = new RenderedDocument($html, $target, $driver, latestSnapshotWins: true, registeredSnapshotId: $snapshot, metadata: $metadata);
+            $rendered = new RenderedDocument($html, $target, $driver, latestSnapshotWins: true, registeredSnapshotId: $snapshot, metadata: $metadata, generator: $generator);
             $connection->table('document_coalescing_targets')->where('target_key', $key)->update([
                 'latest_snapshot' => $snapshot,
                 'latest_fingerprint' => $fingerprint,
@@ -139,7 +141,7 @@ final class DocumentCoalescer
             return null;
         }
 
-        return $connection->transaction(function () use ($connection, $key, $rendered, $version): ?DocumentPublicationResult {
+        return MetadataTransaction::run($connection, function () use ($connection, $key, $rendered, $version): ?DocumentPublicationResult {
             $current = $this->lockTarget($connection, $key);
 
             if ($current->latest_snapshot !== $rendered->snapshotId) {
@@ -179,7 +181,7 @@ final class DocumentCoalescer
             throw new LogicException('Document restoration requires a Laravel-managed transaction.');
         }
         $key = $this->key($target);
-        $connection->transaction(function () use ($connection, $key): void {
+        MetadataTransaction::run($connection, function () use ($connection, $key): void {
             $this->lockTarget($connection, $key);
             $connection->table('document_coalescing_targets')->where('target_key', $key)->update(['tombstoned' => false]);
         }, 5);
@@ -195,7 +197,7 @@ final class DocumentCoalescer
             throw new LogicException('Document invalidation requires a Laravel-managed transaction.');
         }
         $key = $this->key($target);
-        $connection->transaction(function () use ($connection, $key, $tombstone): void {
+        MetadataTransaction::run($connection, function () use ($connection, $key, $tombstone): void {
             $row = $this->lockTarget($connection, $key);
             $connection->table('document_coalescing_targets')->where('target_key', $key)->update([
                 'tombstoned' => $tombstone || $row->tombstoned,
@@ -239,7 +241,7 @@ final class DocumentCoalescer
         $latest = null;
         $lostOwnership = false;
         $existingVersion = null;
-        $published = $connection->transaction(function () use ($connection, $key, $generated, $stage, $storage, $workerToken, &$latest, &$lostOwnership, &$existingVersion): bool {
+        $published = MetadataTransaction::run($connection, function () use ($connection, $key, $generated, $stage, $storage, $workerToken, &$latest, &$lostOwnership, &$existingVersion): bool {
             $target = $this->lockTarget($connection, $key);
             $journal = $connection->table('document_coalescing_stages')->where('version', $stage->version)->lockForUpdate()->first();
 
@@ -320,7 +322,7 @@ final class DocumentCoalescer
         $this->assertOutsideTransaction($connection);
         $key = $this->key($rendered->target);
         $fingerprint = $rendered->fingerprint();
-        $result = $connection->transaction(function () use ($connection, $key, $rendered, $fingerprint, $queueConnection, $queue): array {
+        $result = MetadataTransaction::run($connection, function () use ($connection, $key, $rendered, $fingerprint, $queueConnection, $queue): array {
             $row = $this->lockTarget($connection, $key);
 
             if ($row->tombstoned) {
@@ -361,7 +363,7 @@ final class DocumentCoalescer
         $connection = $this->connection();
         $this->assertOutsideTransaction($connection);
         while (true) {
-            $payload = $connection->transaction(function () use ($connection, $key, $token): ?string {
+            $payload = MetadataTransaction::run($connection, function () use ($connection, $key, $token): ?string {
                 $row = $this->lockTarget($connection, $key);
 
                 if ($row->worker_token !== $token || ! is_string($row->pending)) {
@@ -396,11 +398,13 @@ final class DocumentCoalescer
                 $storage = $this->storage->resolve($rendered->target->storage);
 
                 if ($row->published_fingerprint !== $rendered->fingerprint() || ! $storage->exists($rendered->target->context)) {
-                    $this->publisher->publishCoalescedAttempt($this->generator->generate($rendered), $token);
+                    $generatorClass = $rendered->generatorClass();
+                    $generator = $generatorClass === DocumentGenerator::class ? $this->generator : app($generatorClass);
+                    $this->publisher->publishCoalescedAttempt($generator->generate($rendered), $token);
                 }
             }
 
-            $finished = $connection->transaction(function () use ($connection, $key, $token, $payload): bool {
+            $finished = MetadataTransaction::run($connection, function () use ($connection, $key, $token, $payload): bool {
                 $row = $this->lockTarget($connection, $key);
 
                 if ($row->worker_token !== $token) {
@@ -440,7 +444,7 @@ final class DocumentCoalescer
         $failure = null;
         foreach ($keys as $key) {
             try {
-                $wake = $connection->transaction(function () use ($connection, $key): ?array {
+                $wake = MetadataTransaction::run($connection, function () use ($connection, $key): ?array {
                     $row = $this->lockTarget($connection, $key);
 
                     if ($row->pending === null || ($row->lease_until !== null && $row->lease_until > now()->toDateTimeString())) {
@@ -497,7 +501,7 @@ final class DocumentCoalescer
 
     private function recoverStage(Connection $connection, string $version): void
     {
-        $claimed = $connection->transaction(function () use ($connection, $version): bool {
+        $claimed = MetadataTransaction::run($connection, function () use ($connection, $version): bool {
             $journal = $connection->table('document_coalescing_stages')->where('version', $version)
                 ->lockForUpdate()->first();
 
@@ -584,6 +588,7 @@ final class DocumentCoalescer
             'driver' => $rendered->driver,
             'snapshot' => $rendered->snapshotId,
             'metadata' => ($rendered->metadata ?? null)?->toArray(),
+            'generator' => $rendered->generatorClass(),
         ], JSON_THROW_ON_ERROR));
     }
 
@@ -604,6 +609,11 @@ final class DocumentCoalescer
         if (array_key_exists('metadata', $data) && $data['metadata'] !== null && ! is_array($data['metadata'])) {
             throw new RuntimeException('The stored coalesced document metadata is invalid.');
         }
+        $generator = array_key_exists('generator', $data) ? $data['generator'] : DocumentGenerator::class;
+
+        if (! is_string($generator) || ! is_a($generator, DocumentGenerator::class, true)) {
+            throw new RuntimeException('The stored coalesced document generator is invalid or unavailable.');
+        }
 
         return new RenderedDocument(
             $data['html'],
@@ -612,6 +622,7 @@ final class DocumentCoalescer
             latestSnapshotWins: true,
             registeredSnapshotId: $data['snapshot'],
             metadata: isset($data['metadata']) ? DocumentMetadata::fromArray($data['metadata']) : null,
+            generator: $generator,
         );
     }
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Contracts\Encryption\DecryptException;
+use Illuminate\Database\Events\TransactionCommitting;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Encryption\MissingAppKeyException;
@@ -112,6 +113,152 @@ beforeEach(function () {
     Crypt::clearResolvedInstance('encrypter');
     Config::set('job-progress.cache.store', 'array');
     Storage::fake('documents');
+});
+
+it('recovers the generator captured with the snapshot before dispatch', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('queue.default', 'database');
+        $context = new FilesystemDocumentStorageContext('invoices/custom-generator.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $default = new RenderedDocument('same', $target, latestSnapshotWins: true);
+        $snapshot = new RenderedDocument('same', $target, latestSnapshotWins: true, generator: FakeDocumentGenerator::class);
+        expect($snapshot->snapshotId)->not->toBe($default->snapshotId)
+            ->and(unserialize(serialize($snapshot))->generatorClass())->toBe(FakeDocumentGenerator::class)
+            ->and(serialize($snapshot))->not->toContain('O:'.strlen(FakeDocumentGenerator::class).':"'.FakeDocumentGenerator::class.'"');
+        expect(fn () => Documents::makeJob($snapshot)->withGenerator(HtmlDocumentGenerator::class))
+            ->toThrow(InvalidArgumentException::class, 'generator');
+        $this->artisan('documents:recover')->assertSuccessful();
+        $this->artisan('queue:work', ['connection' => 'database', '--once' => true])->assertSuccessful();
+        expect((new VersionedDocumentStorage)->get($context))->toBe('rendered PDF');
+        expect(Documents::publishWithResult($snapshot)->version)
+            ->toBe((new VersionedDocumentStorage)->versions($context)[0]);
+    });
+});
+
+it('rejects invalid snapshot generators without recording pending work', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $target = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/invalid-generator.pdf', 'documents'));
+        expect(fn () => new RenderedDocument('same', $target, latestSnapshotWins: true, generator: stdClass::class))
+            ->toThrow(InvalidArgumentException::class, 'generator')
+            ->and(DB::table('document_coalescing_targets')->count())->toBe(0);
+    });
+});
+
+it('uses the document generator for synchronous publication and coalesced jobs', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $document = new class extends Document
+        {
+            public static string $storage = 'versioned';
+
+            public static ?string $path = 'invoices/custom-synchronous.pdf';
+
+            public static ?string $disk = 'documents';
+
+            public static ?bool $latestSnapshotWins = true;
+
+            public function html(): string
+            {
+                return 'same';
+            }
+
+            public function generator(): string
+            {
+                return FakeDocumentGenerator::class;
+            }
+        };
+        $snapshot = $document->render();
+        expect($snapshot->generatorClass())->toBe(FakeDocumentGenerator::class)
+            ->and(Documents::generate($snapshot)->contents)->toBe('rendered PDF');
+        $job = Documents::makeJob($snapshot)->withGenerator(FakeDocumentGenerator::class);
+        $job->handle();
+        expect($document->get())->toBe('rendered PDF')
+            ->and(Documents::targetStatus($document->target()))->toBe(DocumentTargetStatus::Published);
+    });
+});
+
+it('restores the connection when a snapshot capture fails during commit', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $target = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/commit-failure.pdf', 'documents'));
+        $connection = DB::connection();
+        Event::listen(TransactionCommitting::class, static fn () => throw new RuntimeException('commit refused'));
+
+        try {
+            expect(fn () => new RenderedDocument('first', $target, latestSnapshotWins: true))
+                ->toThrow(RuntimeException::class, 'commit refused');
+        } finally {
+            Event::forget(TransactionCommitting::class);
+        }
+
+        expect($connection->transactionLevel())->toBe(0)
+            ->and($connection->getPdo()->inTransaction())->toBeFalse()
+            ->and(DB::table('document_coalescing_targets')->count())->toBe(0);
+        new RenderedDocument('retry', $target, latestSnapshotWins: true);
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+    });
+});
+
+it('rolls back a failed publication commit and leaves its stage recoverable', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('queue.default', 'database');
+        $context = new FilesystemDocumentStorageContext('invoices/failed-publication-commit.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $snapshot = new RenderedDocument('same', $target, latestSnapshotWins: true);
+        $storage = new class extends VersionedDocumentStorage
+        {
+            public function stage(DocumentStorageContext $context, string $contents, Closure $record): StagedVersion
+            {
+                $stage = parent::stage($context, $contents, $record);
+                Event::listen(TransactionCommitting::class, static fn () => throw new RuntimeException('publication commit refused'));
+
+                return $stage;
+            }
+        };
+        app(DocumentStorageManager::class)->register('versioned', fn () => $storage, GenerateVersionedDocument::class);
+
+        try {
+            expect(fn () => Documents::publishWithResult(new GeneratedDocument($snapshot, 'PDF', 'commit-test')))
+                ->toThrow(RuntimeException::class, 'publication commit refused');
+        } finally {
+            Event::forget(TransactionCommitting::class);
+        }
+        expect(DB::connection()->getPdo()->inTransaction())->toBeFalse()
+            ->and($storage->versions($context))->toBe([])
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending)
+            ->and(DB::table('document_coalescing_stages')->count())->toBe(1);
+        DB::table('document_coalescing_stages')->update(['created_at' => now()->subHours(2)]);
+        $this->artisan('documents:recover')->assertSuccessful();
+        expect(DB::table('document_coalescing_stages')->count())->toBe(0);
+    });
+});
+
+it('cleans abandoned storage uploads that were never recorded in the document journal', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('concurrency.default', 'sync');
+        $handler = VersionedStorage::directory('invoices/unrecorded-upload.pdf', disk: 'documents');
+        $stage = $handler->stage(fn (FilesystemAdapter $files) => $files->put('document.pdf', 'partial'));
+        DB::table('versioned_storage_stages')->where('version', $stage->version)->update([
+            'state' => 'uploading',
+            'cleanup_after' => now()->subMinute(),
+        ]);
+        expect(DB::table('document_coalescing_stages')->count())->toBe(0);
+        $this->artisan('documents:recover')->assertSuccessful();
+        expect(DB::table('versioned_storage_stages')->where('version', $stage->version)->exists())->toBeTrue();
+        $this->artisan('laravel-versioned-storage:cleanup')->assertSuccessful();
+        expect(DB::table('versioned_storage_stages')->where('version', $stage->version)->exists())->toBeFalse();
+        Storage::disk('documents')->assertMissing("invoices/unrecorded-upload.pdf/{$stage->version}/document.pdf");
+    });
 });
 
 it('tombstones deleted targets until explicitly restored', function () {
