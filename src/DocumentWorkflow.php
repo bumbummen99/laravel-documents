@@ -98,13 +98,9 @@ class DocumentWorkflow
         );
     }
 
-    public function dispatchCoalesced(Document|RenderedDocument $document, ?string $connection = null, ?string $queue = null): bool
+    public function dispatchCoalesced(RenderedDocument $document, ?string $connection = null, ?string $queue = null): bool
     {
-        $coalescer = app(DocumentCoalescer::class);
-
-        return $document instanceof Document
-            ? $coalescer->dispatchDocument($document, $connection, $queue)
-            : $coalescer->dispatch($document, $connection, $queue);
+        return app(DocumentCoalescer::class)->dispatch($document, $connection, $queue);
     }
 
     public function invalidate(DocumentTarget $target): void

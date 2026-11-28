@@ -55,7 +55,9 @@ final readonly class RenderedDocument
         }
 
         $this->snapshotId = $registeredSnapshotId ?? ($latestSnapshotWins
-            ? app(DocumentSnapshotCache::class)->register($this->target, $this->fingerprint())
+            ? (config('laravel-documents.coalescing.enabled')
+                ? app(DocumentCoalescer::class)->capture($this->html, $this->target, $this->driver)
+                : app(DocumentSnapshotCache::class)->register($this->target, $this->fingerprint()))
             : null);
     }
 

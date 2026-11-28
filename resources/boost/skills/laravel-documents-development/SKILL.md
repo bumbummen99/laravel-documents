@@ -83,15 +83,16 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   0.2.0-beta.1 or a compatible release and run its migrations, publish
   `laravel-documents-migrations`, and migrate on the same connection. Enable
   `laravel-documents.coalescing.enabled` and `latest_snapshot_wins`, and use
-  versioned storage for all snapshots. Call `Documents::dispatchCoalesced($document,
+  versioned storage for all snapshots. Call `Documents::dispatchCoalesced($document->render(),
   connection: 'redis', queue: 'pdf')`; unlike `makeJob()`, this dispatches.
   Schedule `documents:recover` every minute and run queue workers. Avoid calling
   coalescing operations inside database transactions.
-- Pass a `Document` directly to atomically register its ordering marker and
-  persist pending work. This calls `html()`, `target()`, and `pdfDriver()`,
-  not an overridden `render()`. An already-rendered snapshot remains supported
-  but has a crash gap between registration and dispatch. Recovery preserves
-  existing wakeups through long backlogs; duplicate workers are possible.
+- Dispatch only a `RenderedDocument`. Rendering atomically registers its
+  marker and recoverable pending snapshot, even for synchronous generation.
+  Recovery can queue it without explicit dispatch, using the default queue if
+  none was selected. Use `$document->html()` for HTML-only previews and secure
+  the application route. Concurrent synchronous and queued generation can
+  produce duplicates. Recovery preserves wakeups through long backlogs.
 - `Documents::tombstoneTarget($target)` fences existing snapshots and rejects
   registrations until `Documents::restoreTarget($target)`. Both can participate
   in a Laravel-managed transaction on the shared metadata connection. Neither

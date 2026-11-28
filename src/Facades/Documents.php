@@ -22,7 +22,7 @@ use SkyRaptor\LaravelDocuments\RenderedDocument;
  * @method static DocumentTargetStatus targetStatus(DocumentTarget $target)
  * @method static GenerateDocument makeJob(Document|RenderedDocument $document, ?string $connection = null, ?string $queue = null, class-string|null $job = null)
  * @method static GenerateDocument|null makeJobIfChanged(Document|RenderedDocument $document, ?string $connection = null, ?string $queue = null, class-string|null $job = null)
- * @method static bool dispatchCoalesced(Document|RenderedDocument $document, ?string $connection = null, ?string $queue = null)
+ * @method static bool dispatchCoalesced(RenderedDocument $document, ?string $connection = null, ?string $queue = null)
  * @method static void invalidate(DocumentTarget $target)
  * @method static void tombstoneTarget(DocumentTarget $target)
  * @method static void restoreTarget(DocumentTarget $target)

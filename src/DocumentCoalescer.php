@@ -6,6 +6,7 @@ namespace SkyRaptor\LaravelDocuments;
 
 use Closure;
 use Illuminate\Database\Connection;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
@@ -13,7 +14,6 @@ use Illuminate\Support\Str;
 use InvalidArgumentException;
 use LogicException;
 use RuntimeException;
-use SkyRaptor\LaravelDocuments\Documents\Document;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateCoalescedDocument;
 use SkyRaptor\LaravelDocuments\Storage\Contexts\FilesystemDocumentStorageContext;
 use SkyRaptor\LaravelDocuments\Storage\Contracts\DocumentStorage;
@@ -34,13 +34,14 @@ final class DocumentCoalescer
         private readonly DocumentStorageManager $storage,
     ) {}
 
-    public function register(DocumentTarget $target, ?string $fingerprint): string
+    public function capture(string $html, DocumentTarget $target, string $driver): string
     {
         $this->assertTarget($target);
         $connection = $this->connection();
         $this->assertOutsideTransaction($connection);
+        $fingerprint = RenderedDocument::fingerprintFor($html, $target, $driver);
 
-        return $connection->transaction(function () use ($connection, $target, $fingerprint): string {
+        return $connection->transaction(function () use ($connection, $html, $target, $driver, $fingerprint): string {
             $key = $this->key($target);
             $row = $this->lockTarget($connection, $key);
 
@@ -48,14 +49,18 @@ final class DocumentCoalescer
                 throw new LogicException('Cannot register a snapshot for a deleted document target.');
             }
 
-            if ($fingerprint !== null && $row->latest_fingerprint === $fingerprint && is_string($row->latest_snapshot)) {
-                return $row->latest_snapshot;
-            }
-
-            $snapshot = (string) Str::uuid();
+            $snapshot = $row->latest_fingerprint === $fingerprint && is_string($row->latest_snapshot)
+                ? $row->latest_snapshot
+                : (string) Str::uuid();
+            $rendered = new RenderedDocument($html, $target, $driver, latestSnapshotWins: true, registeredSnapshotId: $snapshot);
             $connection->table('document_coalescing_targets')->where('target_key', $key)->update([
                 'latest_snapshot' => $snapshot,
                 'latest_fingerprint' => $fingerprint,
+                'pending' => $this->encodeSnapshot($rendered),
+                'worker_token' => $row->worker_token ?? (string) Str::uuid(),
+                'lease_until' => $row->worker_token === null ? null : $row->lease_until,
+                'queue_connection' => $row->worker_token === null ? null : $row->queue_connection,
+                'queue_name' => $row->worker_token === null ? null : $row->queue_name,
             ]);
 
             return $snapshot;
@@ -270,64 +275,38 @@ final class DocumentCoalescer
             throw new LogicException('Coalesced work requires an ordered rendered snapshot.');
         }
 
-        return $this->dispatchSnapshot($rendered->html, $rendered->target, $rendered->driver, $rendered->snapshotId, $queueConnection, $queue);
-    }
-
-    public function dispatchDocument(Document $document, ?string $queueConnection = null, ?string $queue = null): bool
-    {
         $this->assertEnabled();
-        $enabled = $document->latestSnapshotWins() ?? config('laravel-documents.latest_snapshot_wins', false);
-
-        if ($enabled !== true) {
-            throw new LogicException('Coalesced work requires latest snapshot ordering to be enabled.');
-        }
-
-        return $this->dispatchSnapshot($document->html(), $document->target(), $document->pdfDriver(), null, $queueConnection, $queue);
-    }
-
-    private function dispatchSnapshot(string $html, DocumentTarget $target, string $driver, ?string $snapshotId, ?string $queueConnection, ?string $queue): bool
-    {
-        $this->assertEnabled();
-        $this->assertTarget($target);
+        $this->assertTarget($rendered->target);
         $connection = $this->connection();
         $this->assertOutsideTransaction($connection);
-        $key = $this->key($target);
-        $fingerprint = RenderedDocument::fingerprintFor($html, $target, $driver);
-        $result = $connection->transaction(function () use ($connection, $key, $html, $target, $driver, $snapshotId, $fingerprint, $queueConnection, $queue): array {
+        $key = $this->key($rendered->target);
+        $fingerprint = $rendered->fingerprint();
+        $result = $connection->transaction(function () use ($connection, $key, $rendered, $fingerprint, $queueConnection, $queue): array {
             $row = $this->lockTarget($connection, $key);
 
             if ($row->tombstoned) {
-                if ($snapshotId !== null) {
-                    return ['accepted' => false, 'token' => null];
-                }
-
-                throw new LogicException('Cannot register a snapshot for a deleted document target.');
-            }
-
-            if ($snapshotId !== null && $row->latest_snapshot === $snapshotId && $row->latest_fingerprint !== $fingerprint) {
-                throw new RuntimeException('The rendered document fingerprint does not match its registered snapshot.');
-            }
-
-            if ($snapshotId !== null && $row->latest_snapshot !== $snapshotId) {
                 return ['accepted' => false, 'token' => null];
             }
 
-            $snapshotId ??= $row->latest_fingerprint === $fingerprint && is_string($row->latest_snapshot)
-                ? $row->latest_snapshot
-                : (string) Str::uuid();
-            $rendered = new RenderedDocument($html, $target, $driver, latestSnapshotWins: true, registeredSnapshotId: $snapshotId);
-            $token = $row->worker_token === null ? (string) Str::uuid() : null;
+            if ($row->latest_snapshot === $rendered->snapshotId && $row->latest_fingerprint !== $fingerprint) {
+                throw new RuntimeException('The rendered document fingerprint does not match its registered snapshot.');
+            }
+
+            if ($row->latest_snapshot !== $rendered->snapshotId) {
+                return ['accepted' => false, 'token' => null];
+            }
+
+            $token = $row->worker_token === null ? (string) Str::uuid() : $row->worker_token;
+            $wake = $row->worker_token === null || $row->lease_until === null;
             $connection->table('document_coalescing_targets')->where('target_key', $key)->update([
-                'latest_snapshot' => $snapshotId,
-                'latest_fingerprint' => $fingerprint,
                 'pending' => $this->encodeSnapshot($rendered),
                 'queue_connection' => $queueConnection,
                 'queue_name' => $queue,
-                'worker_token' => $token ?? $row->worker_token,
-                'lease_until' => $token === null ? $row->lease_until : $this->leaseUntil(),
+                'worker_token' => $token,
+                'lease_until' => $wake ? $this->leaseUntil() : $row->lease_until,
             ]);
 
-            return ['accepted' => true, 'token' => $token];
+            return ['accepted' => true, 'token' => $wake ? $token : null];
         }, 5);
 
         if ($result['token'] !== null) {
@@ -417,12 +396,13 @@ final class DocumentCoalescer
         $connection = $this->connection();
         $this->assertOutsideTransaction($connection);
         $keys = $connection->table('document_coalescing_targets')->useWritePdo()
-            ->whereNotNull('pending')->where('lease_until', '<=', now())->pluck('target_key');
+            ->whereNotNull('pending')->where(fn (Builder $query) => $query->whereNull('lease_until')->orWhere('lease_until', '<=', now()))
+            ->pluck('target_key');
         foreach ($keys as $key) {
             $wake = $connection->transaction(function () use ($connection, $key): ?array {
                 $row = $this->lockTarget($connection, $key);
 
-                if ($row->pending === null || $row->lease_until === null || $row->lease_until > now()->toDateTimeString()) {
+                if ($row->pending === null || ($row->lease_until !== null && $row->lease_until > now()->toDateTimeString())) {
                     return null;
                 }
 

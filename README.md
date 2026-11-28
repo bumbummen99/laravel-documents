@@ -467,7 +467,8 @@ use SkyRaptor\LaravelDocuments\Facades\Documents;
 use Illuminate\Support\Facades\Schedule;
 
 // InvoiceDocument has public static string $storage = 'versioned'.
-Documents::dispatchCoalesced($document, connection: 'redis', queue: 'pdf');
+$snapshot = $document->render();
+Documents::dispatchCoalesced($snapshot, connection: 'redis', queue: 'pdf');
 
 // Schedule the recovery command in the application's console routes:
 Schedule::command('documents:recover')->everyMinute();
@@ -477,15 +478,24 @@ Schedule::command('documents:recover')->everyMinute();
 superseded before it could be recorded, or `true` when it was accepted.
 Dispatch errors throw even though the recorded request remains recoverable.
 
-Pass a `Document` directly when queued work must survive a crash after it
-supersedes earlier work. Its HTML is rendered first; the new ordering marker
-and pending snapshot are then committed in the same database transaction. A
-crash before that commit leaves the earlier marker and pending work unchanged.
-This path calls `html()`, `target()`, and `pdfDriver()` directly; it does not
-call an overridden `render()` method. Normal `render()` and synchronous
-publication retain their existing behavior. Passing an already
-`RenderedDocument` is also supported, but rendering it registered its marker
-before dispatch, so a crash between those calls cannot recover that request.
+Dispatch accepts only a `RenderedDocument`. Rendering registers its ordering
+marker and pending snapshot together in one database transaction. If the caller
+crashes after that commit but before dispatch, the scheduler recovers the latest
+snapshot; a crash before the commit leaves the previous state intact. Rendering
+therefore requests eventual stored-PDF generation even when dispatch is never
+called. Dispatch requests an immediate wakeup; the queue job contains only its
+target key and worker token, and the worker reads the immutable snapshot from
+the database.
+
+Work recovered before any explicit dispatch uses the default queue connection
+and queue. A new snapshot rendered while work is pending inherits that work's
+queue settings. If recovery starts before a dispatch specifying another queue,
+the existing wakeup may already be on the previous or default queue.
+
+Submit the snapshot even if a separate change check says its fingerprint matches:
+that check and dispatch are not atomic, and other snapshots may be registered
+between them. The worker checks for an existing matching PDF and skips
+generation when it can; publication still fences superseded snapshots.
 
 Run Laravel's scheduler and queue workers continuously. The durable target row
 is written before dispatch. If dispatch fails, the exception is raised and
@@ -501,7 +511,11 @@ Queue connection and name for recovery follow the latest pending request.
 Coalesced jobs do not implement the optional progress integration or batches.
 
 Synchronous `publishWithResult()` uses the same database ordering and staged
-publication, and HTML preview remains separate. A newer synchronous publication
+publication, but rendering its snapshot also records recoverable queue work.
+The scheduler can run a worker concurrently with synchronous generation, so
+duplicate generation and publication of the same snapshot are possible.
+For HTML-only previews, use `$document->html()` instead of `render()`; authorize
+any application route serving that HTML. A newer synchronous publication
 supersedes older pending work; if the same snapshot is already current and the
 PDF exists, the worker skips generation. Conversely, a newer queued snapshot
 supersedes an older synchronous attempt. Registration order is defined after
@@ -521,11 +535,11 @@ regenerated once because their version identifier was not recorded.
 `Documents::targetStatus($document->target())` exposes shared target state:
 `NotScheduled`, `Pending`, `Published`, or `Tombstoned` from
 `DocumentTargetStatus`. `Pending` includes queued, running, failed-attempt,
-and recovery-waiting work; it is not a percentage or a terminal failure.
+and recovery-waiting work, including snapshots rendered but not explicitly
+dispatched; it is not a percentage or a terminal failure.
 `Published` means the latest fingerprint was published, not that the physical
-file has been checked at query time. A newer rendered snapshot that has not
-been queued is `NotScheduled`. This state is shared by all requests for that
-target, not attached to any individual job or requester.
+file has been checked at query time. This state is shared by all requests for
+that target, not attached to any individual job or requester.
 
 Versioned writes are staged outside a transaction. The target's latest snapshot
 check, current-version switch, and fingerprint update commit together on the

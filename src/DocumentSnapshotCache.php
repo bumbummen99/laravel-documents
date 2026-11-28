@@ -25,7 +25,7 @@ final class DocumentSnapshotCache
     public function register(DocumentTarget $target, ?string $fingerprint = null): string
     {
         if (config('laravel-documents.coalescing.enabled')) {
-            return app(DocumentCoalescer::class)->register($target, $fingerprint);
+            throw new LogicException('Coalesced snapshot registration requires the complete rendered snapshot.');
         }
 
         return $this->withTargetLock($target, function (Repository $store, string $key) use ($fingerprint): string {
