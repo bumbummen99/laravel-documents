@@ -44,6 +44,44 @@ beforeEach(function () {
     app()->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
 });
 
+it('reads only a current published snapshot while holding the publication lock', function () {
+    $snapshot = latestSnapshot('original');
+    $cache = app(DocumentSnapshotCache::class);
+    expect($cache->readPublished($snapshot))->toBeNull();
+    Documents::publishWithResult($snapshot);
+    expect($cache->readPublished($snapshot))->toBe('original');
+
+    $key = 'laravel_documents:snapshot:'.hash('sha256', $snapshot->target->context->identity()).':lock';
+    $lock = Cache::lock($key, 30);
+    $storage = Mockery::mock(DocumentStorage::class);
+    $storage->shouldReceive('exists')->once()->andReturnTrue();
+    $storage->shouldReceive('get')->once()->andReturnUsing(function () use ($lock): string {
+        expect($lock->get())->toBeFalse();
+
+        return 'original';
+    });
+    app(DocumentStorageManager::class)->register('disk', fn () => $storage);
+    expect($cache->readPublished($snapshot))->toBe('original')->and($lock->get())->toBeTrue();
+    $lock->release();
+    latestSnapshot('newer');
+    expect($cache->readPublished($snapshot))->toBeNull();
+});
+
+it('rejects invalid publication reads and surfaces storage failures', function () {
+    $unordered = latestSnapshot('unordered', false);
+    $cache = app(DocumentSnapshotCache::class);
+    expect(fn () => $cache->readPublished($unordered))->toThrow(LogicException::class);
+    $snapshot = latestSnapshot('original');
+    Documents::publishWithResult($snapshot);
+    $storage = Mockery::mock(DocumentStorage::class);
+    $storage->shouldReceive('exists')->once()->andReturnTrue();
+    $storage->shouldReceive('get')->once()->andThrow(new RuntimeException('read failed'));
+    app(DocumentStorageManager::class)->register('disk', fn () => $storage);
+    expect(fn () => $cache->readPublished($snapshot))->toThrow(RuntimeException::class, 'read failed');
+    Config::set('laravel-documents.coalescing.enabled', true);
+    expect(fn () => $cache->readPublished($snapshot))->toThrow(LogicException::class);
+});
+
 it('inspects an ordered cache-backed publication without generating another PDF', function () {
     $snapshot = latestSnapshot('original');
     $cache = app(DocumentSnapshotCache::class);

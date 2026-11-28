@@ -447,6 +447,12 @@ for a matching file, `DocumentPublicationStatus::Superseded` if another snapshot
 publication is needed. The check cannot prevent changes after the lock is released;
 in particular, a later fixed-path download may observe a subsequent publication.
 
+For fixed-path downloads, `DocumentSnapshotCache::readPublished($snapshot)`
+checks ordering and the published fingerprint and reads the bytes under the
+publication lock. It returns `null` when the snapshot is superseded or its
+publication is missing, and propagates storage read errors. Serve the returned
+bytes directly instead of redirecting to a path another publisher can replace.
+
 The immutable ID survives serialization and is copied into `GeneratedDocument`.
 Generation, job creation from existing snapshots, publication, and retries do
 not register the snapshot again. Under the same target lock, publication checks

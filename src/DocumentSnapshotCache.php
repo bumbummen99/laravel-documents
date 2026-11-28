@@ -158,6 +158,36 @@ final class DocumentSnapshotCache
         });
     }
 
+    public function readPublished(RenderedDocument $rendered): ?string
+    {
+        if (config('laravel-documents.coalescing.enabled')) {
+            throw new LogicException('Coalesced publication reads must use versioned storage.');
+        }
+
+        if ($rendered->snapshotId === null) {
+            throw new LogicException('Publication reads require an ordered rendered snapshot.');
+        }
+
+        return $this->withTargetLock($rendered->target, function (Repository $store, string $key) use ($rendered): ?string {
+            $latest = $store->get($key.':latest');
+
+            if (! is_string($latest) || $latest === '') {
+                throw new RuntimeException('The latest document snapshot marker is missing.');
+            }
+
+            if ($latest !== $rendered->snapshotId || $store->get($key) !== $rendered->fingerprint()) {
+                return null;
+            }
+            $storage = app(DocumentStorageManager::class)->resolve($rendered->target->storage);
+
+            if (! $storage->exists($rendered->target->context)) {
+                return null;
+            }
+
+            return $storage->get($rendered->target->context);
+        });
+    }
+
     /**
      * Serialize publication and fingerprint updates for each storage target.
      *
