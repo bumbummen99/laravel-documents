@@ -112,6 +112,9 @@ Use this skill when a Laravel application needs to integrate the Laravel Documen
   in a Laravel-managed transaction on the shared metadata connection. Neither
   deletes PDFs. `Documents::invalidate($target)` fences existing snapshots
   without blocking new registrations and does not clear a tombstone.
+- `Documents::retireTarget($target)` atomically tombstones and retires published
+  versions when Versioned Storage supports resource retirement. Scheduled
+  cleanup deletes files later; direct URLs can remain usable until then.
 - `Documents::publishIfChanged($document)` reuses a matching existing version
   or publishes synchronously; it requires coalescing, ordered snapshots, and no
   active transaction. `Documents::targetStatus($target)` reports shared

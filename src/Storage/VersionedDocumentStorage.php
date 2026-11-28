@@ -71,6 +71,11 @@ class VersionedDocumentStorage implements Contracts\DocumentStorage
         return $this->handler($context)->versions();
     }
 
+    public function retire(DocumentStorageContext $context): void
+    {
+        $this->handler($context)->retire();
+    }
+
     protected function handler(DocumentStorageContext $context): VersionedStorageHandler
     {
         $context = FilesystemDocumentStorageContext::from($context);

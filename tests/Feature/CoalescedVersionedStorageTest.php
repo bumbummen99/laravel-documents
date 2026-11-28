@@ -121,6 +121,64 @@ it('tombstones deleted targets until explicitly restored', function () {
     });
 });
 
+it('tombstones and retires all published versions atomically for cleanup', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        $context = new FilesystemDocumentStorageContext('invoices/retired.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $first = Documents::publishWithResult(new RenderedDocument('first', $target, latestSnapshotWins: true));
+        $snapshot = new RenderedDocument('second', $target, latestSnapshotWins: true);
+        $second = Documents::publishWithResult($snapshot);
+        $storage = new VersionedDocumentStorage;
+
+        DB::beginTransaction();
+        Documents::retireTarget($target);
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Tombstoned)
+            ->and($storage->exists($context))->toBeFalse();
+        DB::rollBack();
+        expect($storage->get($context))->toBe('second')
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Published);
+
+        Documents::retireTarget($target);
+        expect(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Tombstoned)
+            ->and($storage->versions($context))->toBe([])
+            ->and(Documents::dispatchCoalesced($snapshot))->toBeFalse();
+        Storage::disk('documents')->assertExists("invoices/retired.pdf/{$first->version}/document.pdf");
+        Storage::disk('documents')->assertExists("invoices/retired.pdf/{$second->version}/document.pdf");
+        Config::set('concurrency.default', 'sync');
+        $this->artisan('laravel-versioned-storage:cleanup')->assertSuccessful();
+        Storage::disk('documents')->assertMissing("invoices/retired.pdf/{$first->version}");
+        Storage::disk('documents')->assertMissing("invoices/retired.pdf/{$second->version}");
+    });
+});
+
+it('rolls back the tombstone if retirement fails', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        $context = new FilesystemDocumentStorageContext('invoices/retire-failure.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        Documents::publishWithResult(new RenderedDocument('current', $target, latestSnapshotWins: true));
+        $storage = new class extends VersionedDocumentStorage
+        {
+            public function retire(DocumentStorageContext $context): void
+            {
+                parent::retire($context);
+
+                throw new RuntimeException('Retirement failed');
+            }
+        };
+        app(DocumentStorageManager::class)->register('versioned', fn () => $storage, GenerateVersionedDocument::class);
+
+        expect(fn () => Documents::retireTarget($target))->toThrow(RuntimeException::class, 'Retirement failed')
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Published)
+            ->and($storage->get($context))->toBe('current');
+    });
+});
+
 it('does not reuse a publication superseded during its existence check', function () {
     withRealVersionedStorage(function () {
         createCoalescingTables();
