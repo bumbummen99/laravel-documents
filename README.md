@@ -429,6 +429,17 @@ supersedes earlier opted-in snapshots for that storage-context identity. If the
 content changes from A to B and back to A, the new A gets a new ID and the
 original A remains superseded. Snapshot IDs do not affect content fingerprints.
 
+When a freshness check must not replace a revision registered while source data
+is being loaded, use `DocumentSnapshotCache::captureIfUnchanged($target, $load)`.
+The closure must load a fresh document for the same target with latest-snapshot
+ordering enabled. The method observes the current marker before invoking the
+closure, then conditionally registers under the publication lock. It returns
+`null` if another revision was registered in between; the caller can retry or
+return a conflict. An equivalent current snapshot retains its existing ID.
+This cache-backed API uses the same shared snapshot cache and lock requirements
+as ordinary ordered publication. For coalesced generation use the separate
+`DocumentCoalescer::captureIfUnchanged()` API described below.
+
 The immutable ID survives serialization and is copied into `GeneratedDocument`.
 Generation, job creation from existing snapshots, publication, and retries do
 not register the snapshot again. Under the same target lock, publication checks

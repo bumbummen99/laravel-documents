@@ -13,6 +13,7 @@ use Illuminate\Support\Str;
 use InvalidArgumentException;
 use LogicException;
 use RuntimeException;
+use SkyRaptor\LaravelDocuments\Documents\Document;
 use Throwable;
 
 final class DocumentSnapshotCache
@@ -28,29 +29,90 @@ final class DocumentSnapshotCache
             throw new LogicException('Coalesced snapshot registration requires the complete rendered snapshot.');
         }
 
-        return $this->withTargetLock($target, function (Repository $store, string $key) use ($fingerprint): string {
-            $latest = $store->get($key.':latest');
+        return $this->withTargetLock($target, fn (Repository $store, string $key): string => $this->registerLocked($store, $key, $fingerprint));
+    }
 
-            if ($fingerprint !== null && is_string($latest)) {
-                [$id, $registeredFingerprint] = array_pad(explode(':', $latest, 2), 2, null);
+    /**
+     * @param  Closure(): Document  $load
+     */
+    public function captureIfUnchanged(DocumentTarget $target, Closure $load): ?RenderedDocument
+    {
+        if (config('laravel-documents.coalescing.enabled')) {
+            throw new LogicException('Coalesced conditional capture must use DocumentCoalescer.');
+        }
 
-                if (Str::isUuid($id) && $registeredFingerprint === $fingerprint) {
-                    return $latest;
-                }
+        $store = $this->store();
+        $this->lockProvider($store);
+        $observed = $store->get($this->key($target).':latest');
+
+        if ($observed !== null && ! is_string($observed)) {
+            throw new RuntimeException('The latest document snapshot marker is invalid.');
+        }
+
+        $document = $load();
+        $actual = $document->target();
+
+        if ($actual->storage !== $target->storage || $actual->context->identity() !== $target->context->identity()) {
+            throw new LogicException('The loaded document must have the observed target.');
+        }
+
+        if (($document->latestSnapshotWins() ?? config('laravel-documents.latest_snapshot_wins', false)) !== true) {
+            throw new LogicException('Conditional capture requires latest snapshot ordering.');
+        }
+
+        $html = $document->html();
+        $driver = $document->pdfDriver();
+        $metadata = $document->metadata();
+        $generator = $document->generator();
+
+        if ($driver === '') {
+            throw new InvalidArgumentException('The document PDF driver configuration cannot be empty.');
+        }
+
+        $this->validateGenerator($generator);
+        $fingerprint = RenderedDocument::fingerprintFor($html, $target, $driver, $metadata, $generator);
+
+        return $this->withTargetLock($target, function (Repository $store, string $key) use ($observed, $target, $html, $driver, $metadata, $generator, $fingerprint): ?RenderedDocument {
+            if ($store->get($key.':latest') !== $observed) {
+                return null;
             }
 
-            $snapshotId = (string) Str::uuid();
+            $snapshotId = $this->registerLocked($store, $key, $fingerprint);
 
-            if ($fingerprint !== null) {
-                $snapshotId .= ':'.$fingerprint;
-            }
-
-            if (! $store->forever($key.':latest', $snapshotId)) {
-                throw new RuntimeException('Failed to register the latest document snapshot.');
-            }
-
-            return $snapshotId;
+            return new RenderedDocument($html, $target, $driver, latestSnapshotWins: true, registeredSnapshotId: $snapshotId, metadata: $metadata, generator: $generator);
         });
+    }
+
+    private function registerLocked(Repository $store, string $key, ?string $fingerprint): string
+    {
+        $latest = $store->get($key.':latest');
+
+        if ($fingerprint !== null && is_string($latest)) {
+            [$id, $registeredFingerprint] = array_pad(explode(':', $latest, 2), 2, null);
+
+            if (Str::isUuid($id) && $registeredFingerprint === $fingerprint) {
+                return $latest;
+            }
+        }
+
+        $snapshotId = (string) Str::uuid();
+
+        if ($fingerprint !== null) {
+            $snapshotId .= ':'.$fingerprint;
+        }
+
+        if (! $store->forever($key.':latest', $snapshotId)) {
+            throw new RuntimeException('Failed to register the latest document snapshot.');
+        }
+
+        return $snapshotId;
+    }
+
+    private function validateGenerator(string $generator): void
+    {
+        if (! is_a($generator, DocumentGenerator::class, true)) {
+            throw new InvalidArgumentException('The document generator must extend '.DocumentGenerator::class.'.');
+        }
     }
 
     public function changed(RenderedDocument $rendered): bool

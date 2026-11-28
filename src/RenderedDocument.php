@@ -54,9 +54,17 @@ final readonly class RenderedDocument
             throw new InvalidArgumentException('Coalesced document generation requires latest snapshot ordering for every document.');
         }
 
-        if ($registeredSnapshotId !== null && (! $latestSnapshotWins || ! Str::isUuid($registeredSnapshotId)
-            || config('laravel-documents.coalescing.enabled') !== true)) {
-            throw new InvalidArgumentException('Restoring a registered snapshot requires coalescing and a valid UUID.');
+        if ($registeredSnapshotId !== null) {
+            if (config('laravel-documents.coalescing.enabled') === true) {
+                $validId = Str::isUuid($registeredSnapshotId);
+            } else {
+                [$id, $fingerprint] = array_pad(explode(':', $registeredSnapshotId, 2), 2, null);
+                $validId = Str::isUuid($id) && is_string($fingerprint) && hash_equals($this->fingerprint(), $fingerprint);
+            }
+
+            if (! $latestSnapshotWins || ! $validId) {
+                throw new InvalidArgumentException('Restoring a registered snapshot requires a valid ordered snapshot ID.');
+            }
         }
 
         $this->snapshotId = $registeredSnapshotId ?? $this->registerSnapshot($latestSnapshotWins);
