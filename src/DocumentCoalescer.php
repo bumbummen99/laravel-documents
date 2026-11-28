@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace SkyRaptor\LaravelDocuments;
 
+use ArrayObject;
 use Closure;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Query\Builder;
@@ -615,17 +616,18 @@ final class DocumentCoalescer
         $failure = null;
         foreach ($keys as $key) {
             try {
-                $eventFailure = null;
+                /** @var ArrayObject<int, Throwable> $eventFailures */
+                $eventFailures = new ArrayObject;
 
                 try {
-                    $wake = $this->reserveRecoveryWakeup($connection, $key, true, $eventFailure);
+                    $wake = $this->reserveRecoveryWakeup($connection, $key, true, $eventFailures);
                 } catch (Throwable $exception) {
-                    if ($exception !== $eventFailure) {
+                    if (! isset($eventFailures[0]) || $exception !== $eventFailures[0]) {
                         throw $exception;
                     }
 
                     report($exception);
-                    $wake = $this->reserveRecoveryWakeup($connection, $key, false, $eventFailure);
+                    $wake = $this->reserveRecoveryWakeup($connection, $key, false, $eventFailures);
                 }
 
                 if ($wake !== null) {
@@ -647,10 +649,13 @@ final class DocumentCoalescer
         }
     }
 
-    /** @return array{string, ?string, ?string}|null */
-    private function reserveRecoveryWakeup(Connection $connection, string $key, bool $recordEvents, ?Throwable &$eventFailure): ?array
+    /**
+     * @param  ArrayObject<int, Throwable>  $eventFailures
+     * @return array{string, ?string, ?string}|null
+     */
+    private function reserveRecoveryWakeup(Connection $connection, string $key, bool $recordEvents, ArrayObject $eventFailures): ?array
     {
-        return MetadataTransaction::run($connection, function () use ($connection, $key, $recordEvents, &$eventFailure): ?array {
+        return MetadataTransaction::run($connection, function () use ($connection, $key, $recordEvents, $eventFailures): ?array {
             $row = $this->lockTarget($connection, $key);
 
             if ($row->pending === null || ($row->lease_until !== null && $row->lease_until > now()->toDateTimeString())) {
@@ -665,7 +670,7 @@ final class DocumentCoalescer
                 try {
                     $this->recordTargetEvent($connection, $key, DocumentTargetEventType::RecoveryDelayed);
                 } catch (Throwable $exception) {
-                    $eventFailure = $exception;
+                    $eventFailures[0] = $exception;
 
                     throw $exception;
                 }
