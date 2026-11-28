@@ -7,6 +7,7 @@ namespace SkyRaptor\LaravelDocuments\Facades;
 use Illuminate\Support\Facades\Facade;
 use SkyRaptor\LaravelDocuments\DocumentPublicationResult;
 use SkyRaptor\LaravelDocuments\Documents\Document;
+use SkyRaptor\LaravelDocuments\DocumentTarget;
 use SkyRaptor\LaravelDocuments\DocumentWorkflow;
 use SkyRaptor\LaravelDocuments\GeneratedDocument;
 use SkyRaptor\LaravelDocuments\Jobs\Contracts\GenerateDocument;
@@ -19,6 +20,7 @@ use SkyRaptor\LaravelDocuments\RenderedDocument;
  * @method static GenerateDocument makeJob(Document|RenderedDocument $document, ?string $connection = null, ?string $queue = null, class-string|null $job = null)
  * @method static GenerateDocument|null makeJobIfChanged(Document|RenderedDocument $document, ?string $connection = null, ?string $queue = null, class-string|null $job = null)
  * @method static bool dispatchCoalesced(Document|RenderedDocument $document, ?string $connection = null, ?string $queue = null)
+ * @method static void invalidate(DocumentTarget $target)
  *
  * @see DocumentWorkflow
  */

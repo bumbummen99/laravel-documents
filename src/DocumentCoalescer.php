@@ -13,6 +13,7 @@ use Illuminate\Support\Str;
 use InvalidArgumentException;
 use LogicException;
 use RuntimeException;
+use SkyRaptor\LaravelDocuments\Documents\Document;
 use SkyRaptor\LaravelDocuments\Jobs\GenerateCoalescedDocument;
 use SkyRaptor\LaravelDocuments\Storage\Contexts\FilesystemDocumentStorageContext;
 use SkyRaptor\LaravelDocuments\Storage\Contracts\DocumentStorage;
@@ -64,6 +65,31 @@ final class DocumentCoalescer
             ->where('target_key', $this->key($rendered->target))->first();
 
         return $row === null || $row->published_fingerprint !== $rendered->fingerprint();
+    }
+
+    public function invalidate(DocumentTarget $target): void
+    {
+        $this->assertEnabled();
+        $this->assertTarget($target);
+        $connection = $this->connection();
+
+        if ($connection->transactionLevel() === 0 && $connection->getPdo()->inTransaction()) {
+            throw new LogicException('Document invalidation requires a Laravel-managed transaction.');
+        }
+        $key = $this->key($target);
+        $connection->transaction(function () use ($connection, $key): void {
+            $this->lockTarget($connection, $key);
+            $connection->table('document_coalescing_targets')->where('target_key', $key)->update([
+                'latest_snapshot' => (string) Str::uuid(),
+                'latest_fingerprint' => null,
+                'published_fingerprint' => null,
+                'pending' => null,
+                'worker_token' => null,
+                'lease_until' => null,
+                'queue_connection' => null,
+                'queue_name' => null,
+            ]);
+        }, 5);
     }
 
     /** @param Closure(string): void $superseded */
@@ -130,30 +156,52 @@ final class DocumentCoalescer
 
     public function dispatch(RenderedDocument $rendered, ?string $queueConnection = null, ?string $queue = null): bool
     {
-        if (! config('laravel-documents.coalescing.enabled')) {
-            throw new LogicException('Enable document coalescing before dispatching coalesced work.');
-        }
-        $this->assertTarget($rendered->target);
-
         if ($rendered->snapshotId === null) {
             throw new LogicException('Coalesced work requires an ordered rendered snapshot.');
         }
+
+        return $this->dispatchSnapshot($rendered->html, $rendered->target, $rendered->driver, $rendered->snapshotId, $queueConnection, $queue);
+    }
+
+    public function dispatchDocument(Document $document, ?string $queueConnection = null, ?string $queue = null): bool
+    {
+        $this->assertEnabled();
+        $enabled = $document->latestSnapshotWins() ?? config('laravel-documents.latest_snapshot_wins', false);
+
+        if ($enabled !== true) {
+            throw new LogicException('Coalesced work requires latest snapshot ordering to be enabled.');
+        }
+
+        return $this->dispatchSnapshot($document->html(), $document->target(), $document->pdfDriver(), null, $queueConnection, $queue);
+    }
+
+    private function dispatchSnapshot(string $html, DocumentTarget $target, string $driver, ?string $snapshotId, ?string $queueConnection, ?string $queue): bool
+    {
+        $this->assertEnabled();
+        $this->assertTarget($target);
         $connection = $this->connection();
         $this->assertOutsideTransaction($connection);
-        $key = $this->key($rendered->target);
-        $result = $connection->transaction(function () use ($connection, $key, $rendered, $queueConnection, $queue): array {
+        $key = $this->key($target);
+        $fingerprint = RenderedDocument::fingerprintFor($html, $target, $driver);
+        $result = $connection->transaction(function () use ($connection, $key, $html, $target, $driver, $snapshotId, $fingerprint, $queueConnection, $queue): array {
             $row = $this->lockTarget($connection, $key);
 
-            if ($row->latest_snapshot === $rendered->snapshotId && $row->latest_fingerprint !== $rendered->fingerprint()) {
+            if ($snapshotId !== null && $row->latest_snapshot === $snapshotId && $row->latest_fingerprint !== $fingerprint) {
                 throw new RuntimeException('The rendered document fingerprint does not match its registered snapshot.');
             }
 
-            if ($row->latest_snapshot !== $rendered->snapshotId) {
+            if ($snapshotId !== null && $row->latest_snapshot !== $snapshotId) {
                 return ['accepted' => false, 'token' => null];
             }
 
+            $snapshotId ??= $row->latest_fingerprint === $fingerprint && is_string($row->latest_snapshot)
+                ? $row->latest_snapshot
+                : (string) Str::uuid();
+            $rendered = new RenderedDocument($html, $target, $driver, latestSnapshotWins: true, registeredSnapshotId: $snapshotId);
             $token = $row->worker_token === null ? (string) Str::uuid() : null;
             $connection->table('document_coalescing_targets')->where('target_key', $key)->update([
+                'latest_snapshot' => $snapshotId,
+                'latest_fingerprint' => $fingerprint,
                 'pending' => $this->encodeSnapshot($rendered),
                 'queue_connection' => $queueConnection,
                 'queue_name' => $queue,
@@ -259,7 +307,11 @@ final class DocumentCoalescer
                 if ($row->pending === null || $row->lease_until === null || $row->lease_until > now()->toDateTimeString()) {
                     return null;
                 }
-                $token = (string) Str::uuid();
+
+                if (! is_string($row->worker_token) || $row->worker_token === '') {
+                    throw new RuntimeException('Pending coalesced work is missing its worker token.');
+                }
+                $token = $row->worker_token;
                 $connection->table('document_coalescing_targets')->where('target_key', $key)
                     ->update(['worker_token' => $token, 'lease_until' => $this->leaseUntil()]);
 

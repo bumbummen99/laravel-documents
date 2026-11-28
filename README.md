@@ -477,6 +477,16 @@ Schedule::command('documents:recover')->everyMinute();
 superseded before it could be recorded, or `true` when it was accepted.
 Dispatch errors throw even though the recorded request remains recoverable.
 
+Pass a `Document` directly when queued work must survive a crash after it
+supersedes earlier work. Its HTML is rendered first; the new ordering marker
+and pending snapshot are then committed in the same database transaction. A
+crash before that commit leaves the earlier marker and pending work unchanged.
+This path calls `html()`, `target()`, and `pdfDriver()` directly; it does not
+call an overridden `render()` method. Normal `render()` and synchronous
+publication retain their existing behavior. Passing an already
+`RenderedDocument` is also supported, but rendering it registered its marker
+before dispatch, so a crash between those calls cannot recover that request.
+
 Run Laravel's scheduler and queue workers continuously. The durable target row
 is written before dispatch. If dispatch fails, the exception is raised and
 recovery retries after `coalescing.lease_seconds`. Terminal worker failures,
@@ -485,7 +495,9 @@ errors. Choose a lease longer than normal queue delay and processing time to
 avoid unnecessary duplicate attempts, and set the queue worker timeout below
 its queue's retry/visibility timeout. Recovery can dispatch another worker after
 a lease expires, so generation and wakeups are **at least once**, not exactly
-once. Queue connection and name for recovery follow the latest pending request.
+once. Recovery keeps existing wakeups valid even when queue delay exceeds the
+lease; overlapping workers can consequently process the same snapshot.
+Queue connection and name for recovery follow the latest pending request.
 Coalesced jobs do not implement the optional progress integration or batches.
 
 Synchronous `publishWithResult()` uses the same database ordering and staged
@@ -513,6 +525,20 @@ records. Restrict database and backup access and apply appropriate retention
 policies. Target ordering rows and fingerprints remain after completion to keep
 old snapshots fenced; do not delete them while old work or snapshots may exist.
 Only trusted processes should be allowed to modify these tables.
+
+Before deleting a document's underlying record, the application can invalidate
+its currently registered and pending work:
+
+```php
+Documents::invalidate($document->target());
+```
+
+In coalescing mode this atomically supersedes existing snapshots and clears
+pending work. It may run inside the same Laravel-managed transaction as the
+record deletion **when both use the same database connection**. It does not
+delete published PDFs, block later render registrations, or prevent stale
+application code from deliberately submitting new work; applications must
+coordinate those separately. A rollback restores the previous pending work.
 
 ### Document events
 

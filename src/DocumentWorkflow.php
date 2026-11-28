@@ -92,10 +92,15 @@ class DocumentWorkflow
 
     public function dispatchCoalesced(Document|RenderedDocument $document, ?string $connection = null, ?string $queue = null): bool
     {
-        return app(DocumentCoalescer::class)->dispatch(
-            $document instanceof Document ? $document->render() : $document,
-            $connection,
-            $queue,
-        );
+        $coalescer = app(DocumentCoalescer::class);
+
+        return $document instanceof Document
+            ? $coalescer->dispatchDocument($document, $connection, $queue)
+            : $coalescer->dispatch($document, $connection, $queue);
+    }
+
+    public function invalidate(DocumentTarget $target): void
+    {
+        app(DocumentCoalescer::class)->invalidate($target);
     }
 }

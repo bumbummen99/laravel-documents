@@ -61,6 +61,11 @@ final readonly class RenderedDocument
 
     public function fingerprint(): string
     {
-        return hash('sha256', serialize([$this->html, $this->target, $this->driver]));
+        return self::fingerprintFor($this->html, $this->target, $this->driver);
+    }
+
+    public static function fingerprintFor(string $html, DocumentTarget $target, string $driver): string
+    {
+        return hash('sha256', serialize([$html, $target, $driver]));
     }
 }
