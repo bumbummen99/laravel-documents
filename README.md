@@ -440,6 +440,13 @@ This cache-backed API uses the same shared snapshot cache and lock requirements
 as ordinary ordered publication. For coalesced generation use the separate
 `DocumentCoalescer::captureIfUnchanged()` API described below.
 
+For ordered cache-backed snapshots, `DocumentSnapshotCache::existingPublicationStatus($snapshot)`
+checks the latest marker, published fingerprint and storage existence under the
+publication lock without generating a PDF. It returns `DocumentPublicationStatus::Published`
+for a matching file, `DocumentPublicationStatus::Superseded` if another snapshot is current, or `null` if
+publication is needed. The check cannot prevent changes after the lock is released;
+in particular, a later fixed-path download may observe a subsequent publication.
+
 The immutable ID survives serialization and is copied into `GeneratedDocument`.
 Generation, job creation from existing snapshots, publication, and retries do
 not register the snapshot again. Under the same target lock, publication checks

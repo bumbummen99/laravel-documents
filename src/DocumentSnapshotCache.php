@@ -14,6 +14,7 @@ use InvalidArgumentException;
 use LogicException;
 use RuntimeException;
 use SkyRaptor\LaravelDocuments\Documents\Document;
+use SkyRaptor\LaravelDocuments\Storage\DocumentStorageManager;
 use Throwable;
 
 final class DocumentSnapshotCache
@@ -125,6 +126,36 @@ final class DocumentSnapshotCache
         $this->lockProvider($store);
 
         return $store->get($this->key($rendered->target)) !== $rendered->fingerprint();
+    }
+
+    public function existingPublicationStatus(RenderedDocument $rendered): ?DocumentPublicationStatus
+    {
+        if (config('laravel-documents.coalescing.enabled')) {
+            throw new LogicException('Coalesced publication inspection must use DocumentCoalescer.');
+        }
+
+        if ($rendered->snapshotId === null) {
+            throw new LogicException('Publication inspection requires an ordered rendered snapshot.');
+        }
+
+        return $this->withTargetLock($rendered->target, function (Repository $store, string $key) use ($rendered): ?DocumentPublicationStatus {
+            $latest = $store->get($key.':latest');
+
+            if (! is_string($latest) || $latest === '') {
+                throw new RuntimeException('The latest document snapshot marker is missing.');
+            }
+
+            if ($latest !== $rendered->snapshotId) {
+                return DocumentPublicationStatus::Superseded;
+            }
+
+            if ($store->get($key) !== $rendered->fingerprint()
+                || ! app(DocumentStorageManager::class)->resolve($rendered->target->storage)->exists($rendered->target->context)) {
+                return null;
+            }
+
+            return DocumentPublicationStatus::Published;
+        });
     }
 
     /**
