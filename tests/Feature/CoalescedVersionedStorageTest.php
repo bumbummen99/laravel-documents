@@ -709,6 +709,58 @@ it('fences a staged publication when the target is tombstoned and restored', fun
     });
 });
 
+it('retires published versions and fences an in-flight staged publication', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        $this->app->bind(DocumentGenerator::class, HtmlDocumentGenerator::class);
+        $context = new FilesystemDocumentStorageContext('invoices/retirement-race.pdf', 'documents');
+        $target = new DocumentTarget('versioned', $context);
+        $published = Documents::publishWithResult(new RenderedDocument('published', $target, latestSnapshotWins: true));
+        $storage = new class($target, $published->version) extends VersionedDocumentStorage
+        {
+            public ?string $stagedVersion = null;
+
+            public function __construct(private DocumentTarget $target, private ?string $publishedVersion)
+            {
+                parent::__construct();
+            }
+
+            public function stage(DocumentStorageContext $context, string $contents, Closure $record): StagedVersion
+            {
+                $stage = parent::stage($context, $contents, $record);
+                $this->stagedVersion = $stage->version;
+                expect($this->exists($context, $this->publishedVersion))->toBeTrue()
+                    ->and(DB::table('document_coalescing_stages')->where('version', $stage->version)->exists())->toBeTrue()
+                    ->and(DB::table('versioned_storage_stages')->where('version', $stage->version)->value('state'))->toBe('ready');
+
+                Documents::retireTarget($this->target);
+                expect(Documents::targetStatus($this->target))->toBe(DocumentTargetStatus::Tombstoned)
+                    ->and($this->exists($context, $this->publishedVersion))->toBeFalse()
+                    ->and(DB::table('versioned_storage_stages')->where('version', $stage->version)->value('state'))->toBe('ready');
+
+                return $stage;
+            }
+        };
+        app(DocumentStorageManager::class)->register('versioned', fn () => $storage, GenerateVersionedDocument::class);
+        $inFlight = new RenderedDocument('in-flight', $target, latestSnapshotWins: true);
+
+        expect(Documents::publishWithResult($inFlight)->status)->toBe(DocumentPublicationStatus::Superseded)
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Tombstoned)
+            ->and($storage->versions($context))->toBe([])
+            ->and(DB::table('document_coalescing_stages')->count())->toBe(0)
+            ->and(DB::table('versioned_storage_stages')->where('version', $storage->stagedVersion)->exists())->toBeFalse();
+        Storage::disk('documents')->assertMissing("invoices/retirement-race.pdf/{$storage->stagedVersion}");
+        Storage::disk('documents')->assertExists("invoices/retirement-race.pdf/{$published->version}/document.pdf");
+        expect(fn () => new RenderedDocument('after retirement', $target, latestSnapshotWins: true))
+            ->toThrow(LogicException::class, 'deleted');
+
+        Config::set('concurrency.default', 'sync');
+        $this->artisan('laravel-versioned-storage:cleanup')->assertSuccessful();
+        Storage::disk('documents')->assertMissing("invoices/retirement-race.pdf/{$published->version}");
+    });
+});
+
 it('does not publish an older stage when a new snapshot registers during staging', function () {
     withRealVersionedStorage(function () {
         createCoalescingTables();
