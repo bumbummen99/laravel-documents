@@ -61,7 +61,7 @@ final class DocumentCoalescer
             throw new LogicException('The loaded document must have the observed target.');
         }
 
-        if (! $document->latestSnapshotWins()) {
+        if (($document->latestSnapshotWins() ?? config('laravel-documents.latest_snapshot_wins', false)) !== true) {
             throw new LogicException('Conditional capture requires latest snapshot ordering.');
         }
 
@@ -615,26 +615,18 @@ final class DocumentCoalescer
         $failure = null;
         foreach ($keys as $key) {
             try {
-                $wake = MetadataTransaction::run($connection, function () use ($connection, $key): ?array {
-                    $row = $this->lockTarget($connection, $key);
+                $eventFailure = null;
 
-                    if ($row->pending === null || ($row->lease_until !== null && $row->lease_until > now()->toDateTimeString())) {
-                        return null;
+                try {
+                    $wake = $this->reserveRecoveryWakeup($connection, $key, true, $eventFailure);
+                } catch (Throwable $exception) {
+                    if ($exception !== $eventFailure) {
+                        throw $exception;
                     }
 
-                    if (! is_string($row->worker_token) || $row->worker_token === '') {
-                        throw new RuntimeException('Pending coalesced work is missing its worker token.');
-                    }
-
-                    if ($row->lease_until !== null && config('laravel-documents.coalescing.record_target_events') === true) {
-                        $this->recordTargetEvent($connection, $key, DocumentTargetEventType::RecoveryDelayed);
-                    }
-                    $token = $row->worker_token;
-                    $connection->table('document_coalescing_targets')->where('target_key', $key)
-                        ->update(['worker_token' => $token, 'lease_until' => $this->leaseUntil()]);
-
-                    return [$token, $row->queue_connection, $row->queue_name];
-                }, 5);
+                    report($exception);
+                    $wake = $this->reserveRecoveryWakeup($connection, $key, false, $eventFailure);
+                }
 
                 if ($wake !== null) {
                     $this->wake($key, $wake[0], $wake[1], $wake[2]);
@@ -653,6 +645,38 @@ final class DocumentCoalescer
         if ($failure !== null) {
             throw $failure;
         }
+    }
+
+    /** @return array{string, ?string, ?string}|null */
+    private function reserveRecoveryWakeup(Connection $connection, string $key, bool $recordEvents, ?Throwable &$eventFailure): ?array
+    {
+        return MetadataTransaction::run($connection, function () use ($connection, $key, $recordEvents, &$eventFailure): ?array {
+            $row = $this->lockTarget($connection, $key);
+
+            if ($row->pending === null || ($row->lease_until !== null && $row->lease_until > now()->toDateTimeString())) {
+                return null;
+            }
+
+            if (! is_string($row->worker_token) || $row->worker_token === '') {
+                throw new RuntimeException('Pending coalesced work is missing its worker token.');
+            }
+
+            if ($recordEvents && $row->lease_until !== null && config('laravel-documents.coalescing.record_target_events') === true) {
+                try {
+                    $this->recordTargetEvent($connection, $key, DocumentTargetEventType::RecoveryDelayed);
+                } catch (Throwable $exception) {
+                    $eventFailure = $exception;
+
+                    throw $exception;
+                }
+            }
+
+            $token = $row->worker_token;
+            $connection->table('document_coalescing_targets')->where('target_key', $key)
+                ->update(['worker_token' => $token, 'lease_until' => $this->leaseUntil()]);
+
+            return [$token, $row->queue_connection, $row->queue_name];
+        }, 5);
     }
 
     private function recordRecoveryFailure(?Throwable $first, Throwable $exception): Throwable

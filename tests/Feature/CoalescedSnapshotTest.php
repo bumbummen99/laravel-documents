@@ -44,6 +44,56 @@ beforeEach(function () {
     Storage::fake('documents');
 });
 
+it('conditionally captures using inherited snapshot ordering', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('laravel-documents.latest_snapshot_wins', true);
+        $document = new class extends Document
+        {
+            public static string $storage = 'versioned';
+
+            public static ?string $path = 'invoices/inherited-ordering.pdf';
+
+            public static ?string $disk = 'documents';
+
+            public function html(): string
+            {
+                return 'inherited ordering';
+            }
+        };
+        $coalescer = app(DocumentCoalescer::class);
+
+        $captured = $coalescer->captureIfUnchanged($document->target(), fn () => $document);
+
+        expect($captured)->not->toBeNull()
+            ->and($coalescer->isCurrent($captured))->toBeTrue()
+            ->and(Documents::targetStatus($document->target()))->toBe(DocumentTargetStatus::Pending);
+    });
+});
+
+it('rejects conditional capture when a document opts out of snapshot ordering', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('laravel-documents.latest_snapshot_wins', true);
+        $document = new class extends Document
+        {
+            public static string $storage = 'versioned';
+
+            public static ?string $path = 'invoices/disabled-ordering.pdf';
+
+            public static ?string $disk = 'documents';
+
+            public static ?bool $latestSnapshotWins = false;
+        };
+
+        expect(fn () => app(DocumentCoalescer::class)->captureIfUnchanged($document->target(), fn () => $document))
+            ->toThrow(LogicException::class, 'Conditional capture requires latest snapshot ordering.')
+            ->and(DB::table('document_coalescing_targets')->count())->toBe(0);
+    });
+});
+
 it('conditionally captures without replacing a newer registered snapshot', function () {
     withRealVersionedStorage(function () {
         createCoalescingTables();

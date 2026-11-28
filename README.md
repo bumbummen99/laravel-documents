@@ -526,8 +526,10 @@ Events are retained until the application removes them; do not prune events
 while subscribers still need them. A terminated worker cannot record its own
 death, and a database outage can prevent recording an observed failure. A
 recording error is reported without replacing the original job exception.
-Recovery can later record uncertainty after the database is available. Event
-history and notifications are not exactly-once. Applications must authorize
+If recording a recovery event fails, the error is reported and recovery retries
+the reservation without that event; failures to reserve or dispatch work still
+surface. Recovery can later record uncertainty after the database is available.
+Event history and notifications are not exactly-once. Applications must authorize
 access to each target before reading its state or history.
 
 Dispatch accepts only a `RenderedDocument`. Rendering registers its ordering
