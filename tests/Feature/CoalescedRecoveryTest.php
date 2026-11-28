@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use SkyRaptor\LaravelDocuments\DocumentCoalescer;
@@ -80,6 +81,26 @@ it('records failed attempts and uncertain lease recovery separately from pending
         $other = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/other.pdf', 'documents'));
         expect(Documents::targetEvents($other))->toBe([])
             ->and(Documents::targetEventCursor($other))->toBe(0);
+    });
+});
+
+it('reports event recording errors without replacing the original attempt exception', function () {
+    withRealVersionedStorage(function () {
+        createCoalescingTables();
+        Config::set('laravel-documents.coalescing.enabled', true);
+        Config::set('laravel-documents.coalescing.record_target_events', true);
+        Config::set('queue.default', 'database');
+        $target = new DocumentTarget('versioned', new FilesystemDocumentStorageContext('invoices/event-outage.pdf', 'documents'));
+        Documents::dispatchCoalesced(new RenderedDocument('pending', $target, latestSnapshotWins: true));
+        $row = DB::table('document_coalescing_targets')->first();
+        $job = new GenerateCoalescedDocument($row->target_key, $row->worker_token);
+        $this->app->bind(DocumentGenerator::class, fn () => throw new RuntimeException('generator unavailable'));
+        Exceptions::fake();
+
+        expect(fn () => $job->handle(app(DocumentCoalescer::class)))
+            ->toThrow(RuntimeException::class, 'generator unavailable')
+            ->and(Documents::targetStatus($target))->toBe(DocumentTargetStatus::Pending);
+        Exceptions::assertReported(QueryException::class);
     });
 });
 
